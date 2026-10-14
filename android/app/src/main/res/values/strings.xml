@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">BON</string>
+    <string name="title_activity_main">BON</string>
+    <string name="package_name">com.bon.gestion</string>
+    <string name="custom_url_scheme">com.bon.gestion</string>
+</resources>

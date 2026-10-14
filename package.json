@@ -1,0 +1,84 @@
+{
+  "name": "brewmaster-os",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Sistema de gestión integral para cervecerías artesanales",
+  "author": "BON Artesanal <contacto@bonartesanal.com>",
+  "homepage": "https://bonartesanal.com",
+  "type": "module",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "build": "vite build",
+    "preview": "vite preview",
+    "icons": "node scripts/update-icons.js",
+    "apk": "node scripts/build-apk.js",
+    "linux": "npm install && npm run icons && npm run build && electron-builder build --linux snap tar.gz deb"
+  },
+  "build": {
+    "appId": "com.bon.gestion",
+    "productName": "BON Gestion",
+    "directories": {
+      "output": "dist_electron"
+    },
+    "asarUnpack": [
+      "**/*.db",
+      "**/node_modules/sqlite3/**/*"
+    ],
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "build/icon.png",
+      "build/icons/**/*"
+    ],
+    "linux": {
+      "target": [
+        "snap",
+        "tar.gz",
+        "deb"
+      ],
+      "category": "Office",
+      "icon": "build/icons/"
+    },
+    "snap": {
+      "grade": "stable",
+      "confinement": "strict",
+      "base": "core22"
+    }
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.0.0",
+    "@capacitor/core": "^6.0.0",
+    "@google/genai": "^1.30.0",
+    "@openai-oauth/ai-sdk": "^2.0.0",
+    "@openai-oauth/local": "^2.0.0",
+    "@openai-oauth/react": "^2.0.0",
+    "@tanstack/react-virtual": "^3.13.24",
+    "ai": "^6.0.303",
+    "dexie": "^4.4.2",
+    "lucide-react": "^0.344.0",
+    "openai-oauth": "^2.0.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-virtuoso": "^4.18.4",
+    "recharts": "^2.12.2",
+    "zod": "^4.4.3",
+    "zustand": "^5.0.12"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.0.0",
+    "@types/react": "^18.2.66",
+    "@types/react-dom": "^18.2.22",
+    "@vitejs/plugin-react": "^4.2.1",
+    "autoprefixer": "^10.4.18",
+    "electron": "^28.2.0",
+    "electron-builder": "^24.9.1",
+    "postcss": "^8.4.35",
+    "tailwindcss": "^3.4.1",
+    "typescript": "^5.2.2",
+    "vite": "^5.1.6",
+    "vitest": "^4.1.5"
+  }
+}

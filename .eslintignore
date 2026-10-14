@@ -1,0 +1,5 @@
+android/
+dist/
+dist_electron/
+node_modules/
+coverage/
