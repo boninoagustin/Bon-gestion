@@ -268,7 +268,7 @@ function AppContent() {
           setCurrentView(view);
           setIsMobileMoreOpen(false);
         }}
-        className={`flex flex-col items-center justify-center min-w-[60px] py-2 transition-all duration-200 ${
+        className={`flex flex-col items-center justify-center min-w-[60px] min-h-[48px] py-2 transition-all duration-200 select-none ${
           isActive ? 'text-copper scale-105' : 'text-slate-500 dark:text-slate-400'
         }`}
       >
@@ -363,7 +363,7 @@ function AppContent() {
           </div>
 
           {/* Scrollable Content Area */}
-          <div className="flex-1 overflow-y-auto overflow-x-hidden bg-craft dark:bg-zinc-950">
+          <div className="flex-1 overflow-y-auto overflow-x-hidden bg-craft dark:bg-[#121417]">
             {/* Padding bottom accounts for bottom nav on mobile */}
             <div className="p-4 lg:p-8 pb-24 lg:pb-8 max-w-7xl mx-auto animate-fade-in">
                {renderContent()}
@@ -371,7 +371,7 @@ function AppContent() {
           </div>
 
           {/* Mobile Bottom Navigation */}
-          <div className="lg:hidden fixed bottom-0 left-0 right-0 bg-white dark:bg-zinc-900 border-t border-slate-200 dark:border-zinc-800 shadow-[0_-2px_10px_rgba(0,0,0,0.05)] z-40 pb-safe">
+          <div className="lg:hidden fixed bottom-0 left-0 right-0 bg-white dark:bg-[#1a1d21] border-t border-slate-200 dark:border-[#2c3138] shadow-[0_-2px_10px_rgba(0,0,0,0.05)] z-40 pb-safe">
             <div className="grid grid-cols-5 px-1 pb-1 pt-1 gap-1">
               <BottomNavItem view={ViewState.DASHBOARD} label="Panel" icon={LayoutDashboard} />
               <BottomNavItem view={ViewState.PRODUCTION} label="Prod." icon={Factory} />
@@ -379,7 +379,7 @@ function AppContent() {
               <BottomNavItem view={ViewState.PACKAGING} label="Envase" icon={Beer} />
               <button
                 onClick={() => setIsMobileMoreOpen(true)}
-                className={`flex flex-col items-center justify-center min-w-[60px] py-2 transition-all duration-200 text-slate-500 dark:text-slate-400`}
+                className={`flex flex-col items-center justify-center min-w-[60px] min-h-[48px] py-2 transition-all duration-200 select-none text-slate-500 dark:text-slate-400`}
               >
                 <Menu size={20} strokeWidth={2} />
                 <span className="text-[9px] mt-1 font-medium leading-none whitespace-nowrap">Más</span>

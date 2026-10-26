@@ -1,59 +1,153 @@
-
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-/* ========================================
-   BON Gestión — Design System
-   ======================================== */
+/* ==========================================================================
+   BON Gestión — Industrial Craft Brewery Design System
+   Paleta Pizarra/Carbón (#121417, #1a1d21), Bronce/Ámbar (#d97706, #f59e0b)
+   y Semáforos Industriales (Verde Lúpulo, Rojo Alerta, Azul Enfriamiento)
+   ========================================================================== */
 
 :root {
-  /* Color Tokens */
-  --color-craft: #fdfbf7;
-  --color-craft-dark: #0f0f12;
-  --color-copper: #b87333;
-  --color-copper-dark: #935c28;
-  --color-copper-light: #d4955e;
-  --color-slate-dark: #18181b;
-  
-  /* Transitions */
+  /* Fondos y Superficies */
+  --color-craft: #f8f6f1;
+  --color-craft-dark: #121417;
+  --color-craft-surface: #1a1d21;
+  --color-craft-elevated: #22262b;
+  --color-craft-border: #2c3138;
+  --color-slate-dark: #121417;
+
+  /* Acentos Bronce / Ámbar Dorado */
+  --color-copper: #d97706;
+  --color-copper-light: #f59e0b;
+  --color-copper-dark: #b45309;
+
+  /* Semáforos Industriales */
+  --color-status-hop: #10b981;
+  --color-status-alert: #ef4444;
+  --color-status-chill: #0ea5e9;
+
+  /* Transiciones */
   --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
-  --transition-normal: 300ms cubic-bezier(0.4, 0, 0.2, 1);
-  --transition-slow: 500ms cubic-bezier(0.4, 0, 0.2, 1);
-  
-  /* Shadows */
-  --shadow-card: 0 1px 3px 0 rgb(0 0 0 / 0.06), 0 1px 2px -1px rgb(0 0 0 / 0.06);
-  --shadow-card-hover: 0 10px 25px -5px rgb(0 0 0 / 0.08), 0 8px 10px -6px rgb(0 0 0 / 0.04);
-  --shadow-modal: 0 25px 50px -12px rgb(0 0 0 / 0.35);
+  --transition-normal: 260ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-slow: 450ms cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Sombras Industriales */
+  --shadow-card: 0 2px 6px -1px rgb(0 0 0 / 0.08), 0 1px 3px -1px rgb(0 0 0 / 0.06);
+  --shadow-card-hover: 0 12px 28px -6px rgb(0 0 0 / 0.16), 0 4px 12px -4px rgb(0 0 0 / 0.08);
+  --shadow-modal: 0 25px 50px -12px rgb(0 0 0 / 0.55);
 }
 
-/* ========================================
-   Base Styles
-   ======================================== */
+/* ==========================================================================
+   Base Tipográfica y Lecturas Técnicas (Densidad, pH, Volumen, Temperatura)
+   ========================================================================== */
 
 body {
   background-color: var(--color-craft);
-  font-family: 'Inter', system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  color: #18181b;
+  font-family: 'Inter', 'Roboto', system-ui, -apple-system, 'Segoe UI', sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  transition: background-color var(--transition-slow), color var(--transition-slow);
+  transition: background-color var(--transition-normal), color var(--transition-normal);
+  touch-action: manipulation;
 }
-
-/* ========================================
-   Dark Mode
-   ======================================== */
 
 .dark body,
 body.dark {
   background-color: var(--color-craft-dark);
-  color: #e4e4e7;
+  color: #e4e7eb;
 }
 
+/* Números tabulares estrictos para telemetría de planta (SG, °P, pH, L, °C, PSI) */
+.font-mono,
+.metric-reading,
+input[type='number'],
+input[inputmode='decimal'] {
+  font-family: 'JetBrains Mono', 'Roboto Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.015em;
+}
 
+/* ==========================================================================
+   Ergonomía Táctil Industrial (Estándar >= 44x44px para Planta Húmeda/Guantes)
+   ========================================================================== */
 
-/* ========================================
-   Scrollbar
-   ======================================== */
+@layer components {
+  .touch-target {
+    min-height: 44px;
+    min-width: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .btn-industrial {
+    min-height: 44px;
+    padding-left: 1rem;
+    padding-right: 1rem;
+    border-radius: 0.75rem;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    transition: transform var(--transition-fast), background-color var(--transition-fast), box-shadow var(--transition-fast);
+    user-select: none;
+  }
+
+  .btn-industrial:active {
+    transform: scale(0.97);
+  }
+
+  /* Tarjeta de superficie industrial pizarra/carbón */
+  .panel-craft {
+    background-color: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 1rem;
+    box-shadow: var(--shadow-card);
+  }
+
+  .dark .panel-craft {
+    background-color: var(--color-craft-surface);
+    border-color: var(--color-craft-border);
+    box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.4), inset 0 1px 0 0 rgba(255, 255, 255, 0.03);
+  }
+
+  /* Barras de progreso de fermentación y maduración con gradientes sutiles */
+  .fermentation-progress-track {
+    width: 100%;
+    height: 0.5rem;
+    background-color: #e2e8f0;
+    border-radius: 9999px;
+    overflow: hidden;
+    position: relative;
+  }
+
+  .dark .fermentation-progress-track {
+    background-color: #121417;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6);
+  }
+
+  .fermentation-progress-bar {
+    height: 100%;
+    border-radius: 9999px;
+    background-image: linear-gradient(90deg, #d97706 0%, #f59e0b 55%, #10b981 100%);
+    transition: width 600ms cubic-bezier(0.22, 1, 0.36, 1);
+    position: relative;
+  }
+
+  .fermentation-progress-bar--chill {
+    background-image: linear-gradient(90deg, #0284c7 0%, #0ea5e9 55%, #38bdf8 100%);
+  }
+
+  .fermentation-progress-bar--alert {
+    background-image: linear-gradient(90deg, #dc2626 0%, #ef4444 60%, #f59e0b 100%);
+  }
+}
+
+/* ==========================================================================
+   Scrollbars Industriales
+   ========================================================================== */
 
 ::-webkit-scrollbar {
   width: 6px;
@@ -63,20 +157,22 @@ body.dark {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #d1d5db;
+  background: #cbd5e1;
   border-radius: 999px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #9ca3af;
+  background: #94a3b8;
+}
+.dark ::-webkit-scrollbar-track {
+  background: #121417;
 }
 .dark ::-webkit-scrollbar-thumb {
-  background: #3f3f46;
+  background: #2c3138;
 }
 .dark ::-webkit-scrollbar-thumb:hover {
-  background: #52525b;
+  background: #3f4650;
 }
 
-/* Hide scrollbar for bottom nav */
 .scrollbar-hide {
   -ms-overflow-style: none;
   scrollbar-width: none;
@@ -85,9 +181,9 @@ body.dark {
   display: none;
 }
 
-/* ========================================
-   Animations
-   ======================================== */
+/* ==========================================================================
+   Animaciones Sutiles y Microinteracciones
+   ========================================================================== */
 
 @keyframes fadeIn {
   from { opacity: 0; }
@@ -95,22 +191,22 @@ body.dark {
 }
 
 @keyframes fadeInUp {
-  from { opacity: 0; transform: translateY(12px); }
+  from { opacity: 0; transform: translateY(10px); }
   to { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes fadeInDown {
-  from { opacity: 0; transform: translateY(-12px); }
+  from { opacity: 0; transform: translateY(-10px); }
   to { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes slideInRight {
-  from { opacity: 0; transform: translateX(20px); }
+  from { opacity: 0; transform: translateX(18px); }
   to { opacity: 1; transform: translateX(0); }
 }
 
 @keyframes scaleIn {
-  from { opacity: 0; transform: scale(0.95); }
+  from { opacity: 0; transform: scale(0.96); }
   to { opacity: 1; transform: scale(1); }
 }
 
@@ -119,207 +215,89 @@ body.dark {
   100% { background-position: 200% 0; }
 }
 
-@keyframes pulse-soft {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.6; }
-}
-
-@keyframes toast-in {
-  from { opacity: 0; transform: translateY(100%) scale(0.95); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
-}
-
-@keyframes toast-out {
-  from { opacity: 1; transform: translateY(0) scale(1); }
-  to { opacity: 0; transform: translateY(100%) scale(0.95); }
-}
-
-.animate-fade-in { animation: fadeIn 0.4s ease-out forwards; }
-.animate-fade-in-up { animation: fadeInUp 0.5s ease-out forwards; }
-.animate-fade-in-down { animation: fadeInDown 0.4s ease-out forwards; }
-.animate-slide-in-right { animation: slideInRight 0.4s ease-out forwards; }
-.animate-scale-in { animation: scaleIn 0.3s ease-out forwards; }
-.animate-toast-in { animation: toast-in 0.35s cubic-bezier(0.21, 1.02, 0.73, 1) forwards; }
-.animate-toast-out { animation: toast-out 0.25s ease-in forwards; }
-
-/* Staggered animation for lists */
-.animate-stagger > * { opacity: 0; animation: fadeInUp 0.4s ease-out forwards; }
-.animate-stagger > *:nth-child(1) { animation-delay: 0ms; }
-.animate-stagger > *:nth-child(2) { animation-delay: 50ms; }
-.animate-stagger > *:nth-child(3) { animation-delay: 100ms; }
-.animate-stagger > *:nth-child(4) { animation-delay: 150ms; }
-.animate-stagger > *:nth-child(5) { animation-delay: 200ms; }
-.animate-stagger > *:nth-child(6) { animation-delay: 250ms; }
-.animate-stagger > *:nth-child(7) { animation-delay: 300ms; }
-.animate-stagger > *:nth-child(8) { animation-delay: 350ms; }
-
-/* ========================================
-   Card Interactions
-   ======================================== */
-
-.card-hover {
-  transition: transform var(--transition-fast), box-shadow var(--transition-fast);
-}
-.card-hover:hover {
-  transform: translateY(-2px);
-  box-shadow: var(--shadow-card-hover);
-}
-
-.card-press:active {
-  transform: scale(0.98);
-}
-
-/* ========================================
-   Skeleton Loading
-   ======================================== */
-
-.skeleton {
-  background: linear-gradient(90deg, #e5e7eb 25%, #f3f4f6 50%, #e5e7eb 75%);
-  background-size: 200% 100%;
-  animation: shimmer 1.5s infinite;
-  border-radius: 8px;
-}
-
-.dark .skeleton {
-  background: linear-gradient(90deg, #27272a 25%, #3f3f46 50%, #27272a 75%);
-  background-size: 200% 100%;
-}
-
-/* ========================================
-   Toast Notifications
-   ======================================== */
-
-.toast-container {
-  position: fixed;
-  bottom: 80px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 9999;
-  pointer-events: none;
-}
-
-.toast-container > * {
-  pointer-events: auto;
-}
-
-/* ========================================
-   Modal Backdrop
-   ======================================== */
-
-.modal-backdrop {
-  animation: fadeIn 0.2s ease-out;
-}
-
-.modal-content {
-  animation: scaleIn 0.3s cubic-bezier(0.21, 1.02, 0.73, 1);
-}
-
-/* ========================================
-   Search Dialog
-   ======================================== */
-
-.search-overlay {
-  animation: fadeIn 0.15s ease-out;
-}
-
-.search-dialog {
-  animation: fadeInDown 0.2s cubic-bezier(0.21, 1.02, 0.73, 1);
-}
-
-/* ========================================
-   iOS Safe Areas
-   ======================================== */
-
-.pb-safe {
-  padding-bottom: env(safe-area-inset-bottom, 0px);
-}
-
-/* ========================================
-   Utilities
-   ======================================== */
-
-.text-balance {
-  text-wrap: balance;
-}
-
-.line-clamp-2 {
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-}
-
-/* ========================================
-   Toast Animations
-   ======================================== */
-
 @keyframes toastIn {
-  from { opacity: 0; transform: translateY(16px) scale(0.95); }
+  from { opacity: 0; transform: translateY(16px) scale(0.96); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 @keyframes toastOut {
   from { opacity: 1; transform: translateY(0) scale(1); }
-  to { opacity: 0; transform: translateY(-8px) scale(0.95); }
+  to { opacity: 0; transform: translateY(-8px) scale(0.96); }
 }
 
-.animate-toast-in {
-  animation: toastIn 0.3s cubic-bezier(0.21, 1.02, 0.73, 1);
+.animate-fade-in { animation: fadeIn 0.3s ease-out forwards; }
+.animate-fade-in-up { animation: fadeInUp 0.4s ease-out forwards; }
+.animate-fade-in-down { animation: fadeInDown 0.35s ease-out forwards; }
+.animate-slide-in-right { animation: slideInRight 0.35s ease-out forwards; }
+.animate-scale-in { animation: scaleIn 0.25s ease-out forwards; }
+.animate-toast-in { animation: toastIn 0.3s cubic-bezier(0.21, 1.02, 0.73, 1) forwards; }
+.animate-toast-out { animation: toastOut 0.25s ease-in forwards; }
+
+.animate-stagger > * { opacity: 0; animation: fadeInUp 0.35s ease-out forwards; }
+.animate-stagger > *:nth-child(1) { animation-delay: 0ms; }
+.animate-stagger > *:nth-child(2) { animation-delay: 45ms; }
+.animate-stagger > *:nth-child(3) { animation-delay: 90ms; }
+.animate-stagger > *:nth-child(4) { animation-delay: 135ms; }
+.animate-stagger > *:nth-child(5) { animation-delay: 180ms; }
+.animate-stagger > *:nth-child(6) { animation-delay: 225ms; }
+
+.card-hover {
+  transition: transform var(--transition-fast), box-shadow var(--transition-fast), border-color var(--transition-fast);
+}
+.card-hover:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-card-hover);
+}
+.card-press:active {
+  transform: scale(0.98);
 }
 
-.animate-toast-out {
-  animation: toastOut 0.3s ease-in forwards;
+/* Skeleton Loading */
+.skeleton {
+  background: linear-gradient(90deg, #e5e7eb 25%, #f3f4f6 50%, #e5e7eb 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+  border-radius: 0.75rem;
+}
+.dark .skeleton {
+  background: linear-gradient(90deg, #1a1d21 25%, #262b31 50%, #1a1d21 75%);
+  background-size: 200% 100%;
 }
 
-/* ========================================
-   Dark Mode Overrides
-   
-   These global rules automatically transform 
-   common Tailwind patterns across ALL components,
-   avoiding the need to add dark: variants to
-   every single element.
-   ======================================== */
+/* Toast & Modal Utilities */
+.toast-container {
+  position: fixed;
+  bottom: 84px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9999;
+  pointer-events: none;
+}
+.toast-container > * {
+  pointer-events: auto;
+}
 
+.modal-backdrop {
+  animation: fadeIn 0.2s ease-out;
+}
+.modal-content {
+  animation: scaleIn 0.25s cubic-bezier(0.21, 1.02, 0.73, 1);
+}
 
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
 
-/* Charts */
+/* Recharts Dark Overrides */
 .dark .recharts-cartesian-grid line {
-  stroke: #3f3f46;
+  stroke: #2c3138;
 }
 .dark .recharts-text {
-  fill: #71717a;
+  fill: #94a3b8;
+  font-family: 'JetBrains Mono', 'Roboto Mono', monospace;
 }
-
-/* Tooltip */
 .dark .recharts-default-tooltip {
-  background: #27272a !important;
-  border: 1px solid #3f3f46 !important;
+  background: #1a1d21 !important;
+  border: 1px solid #2c3138 !important;
+  border-radius: 0.75rem !important;
 }
-
-/* --- Scrollbar --- */
-.dark ::-webkit-scrollbar-track {
-  background: #18181b;
-}
-.dark ::-webkit-scrollbar-thumb {
-  background: #3f3f46;
-}
-.dark ::-webkit-scrollbar-thumb:hover {
-  background: #52525b;
-}
-
-/* Smoother dark transitions */
-*, *::before, *::after {
-  transition-property: background-color, border-color, color;
-  transition-duration: 0.15s;
-  transition-timing-function: ease;
-}
-
-/* Exempt animations from generic transition */
-.animate-fade-in, .animate-slide-up, .animate-scale-in,
-.animate-toast-in, .animate-toast-out, .modal-content,
-.search-dialog, .search-overlay {
-  transition: none;
-}
-
-

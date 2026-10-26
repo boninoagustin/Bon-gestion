@@ -1,5 +1,16 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
-vi.mock('../db', () => ({ dbGet: vi.fn(async (_key, fallback) => fallback), dbSet: vi.fn(async () => {}) }));
+vi.mock('../db', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../db')>();
+  return {
+    ...actual,
+    dbGet: vi.fn(async (_key, fallback) => fallback),
+    dbSet: vi.fn(async () => {}),
+    scheduleTransactionalSave: vi.fn(async () => {}),
+    dbCommitTransaction: vi.fn(async () => true),
+    txPackageBatchToKeg: vi.fn(async () => true),
+    txConsumeIngredientsForBatch: vi.fn(async () => true),
+  };
+});
 import { useBreweryStore as store } from '../store';
 import { BatchStatus, type Batch, type Fermenter } from '../../types';
 import { dbSet } from '../db';

@@ -1,12 +1,23 @@
 import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { useBreweryStore } from '../context/store';
-import { Beer, Plus, X, Droplet, GlassWater, Maximize, Minimize, Gift } from 'lucide-react';
+import {
+  Beer,
+  Plus,
+  X,
+  Droplet,
+  GlassWater,
+  Maximize,
+  Minimize,
+  Gift,
+  CheckCircle2,
+} from 'lucide-react';
+import { Keg } from '../types';
 
 export const Taproom: React.FC = () => {
-  const { kegs, batches, toggleKegTap, serveFromTap, giftFromTap } = useBreweryStore();
-  
-  // Local state for prices during the session
+  const { kegs, batches, toggleKegTap, serveFromTap, giftFromTap } =
+    useBreweryStore();
+
   const [prices, setPrices] = useState({
     media: 2000,
     pinta: 3000,
@@ -16,10 +27,23 @@ export const Taproom: React.FC = () => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
-  const tappedKegs = kegs.filter(k => k.isTapped && k.status === 'IN_HOUSE' && k.currentVolume !== 0);
-  const availableKegs = kegs.filter(k => !k.isTapped && k.status === 'IN_HOUSE' && (k.currentVolume === undefined || k.currentVolume > 0));
+  const tappedKegs = kegs.filter(
+    (k) => k.isTapped && k.status === 'IN_HOUSE' && k.currentVolume !== 0
+  );
+  const availableKegs = kegs.filter(
+    (k) =>
+      !k.isTapped &&
+      k.status === 'IN_HOUSE' &&
+      (k.currentVolume === undefined || k.currentVolume > 0) &&
+      !!k.contents
+  );
 
-  const handleServe = (kegId: string, volume: number, format: string, price: number) => {
+  const handleServe = (
+    kegId: string,
+    volume: number,
+    format: string,
+    price: number
+  ) => {
     serveFromTap(kegId, volume, format, price);
   };
 
@@ -28,12 +52,10 @@ export const Taproom: React.FC = () => {
       try {
         await document.documentElement.requestFullscreen();
       } catch (err) {
-        console.error("Error attempting to enable fullscreen:", err);
+        console.error('Error attempting to enable fullscreen:', err);
       }
-    } else {
-      if (document.exitFullscreen) {
-        await document.exitFullscreen();
-      }
+    } else if (document.exitFullscreen) {
+      await document.exitFullscreen();
     }
   };
 
@@ -42,107 +64,223 @@ export const Taproom: React.FC = () => {
       setIsFullscreen(!!document.fullscreenElement);
     };
     document.addEventListener('fullscreenchange', handleFullscreenChange);
-    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    return () =>
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
   }, []);
 
-  const renderKegCard = (keg: any, isPosMode: boolean = false) => {
-    const batch = batches.find(b => b.id === keg.batchId);
+  const renderKegCard = (keg: Keg, isPosMode: boolean = false) => {
+    const batch = batches.find((b) => b.id === keg.batchId);
     const currentVol = keg.currentVolume ?? keg.size;
-    const percentage = (currentVol / keg.size) * 100;
+    const percentage = Math.min(
+      100,
+      Math.max(0, (currentVol / keg.size) * 100)
+    );
     const pintasLeft = Math.floor(currentVol / 0.5);
 
     return (
-      <div key={keg.id} className={`${isPosMode ? 'bg-zinc-900 border-zinc-800 shadow-xl' : 'bg-white dark:bg-zinc-900/60 backdrop-blur-md border-slate-200 dark:border-zinc-800/80'} border rounded-2xl p-5 flex flex-col relative overflow-hidden group hover:shadow-md transition-all`}>
-        <div className="absolute top-0 left-0 w-full h-1.5 bg-slate-100 dark:bg-zinc-800">
-          <div className={`h-full transition-all duration-500 ${percentage > 50 ? 'bg-emerald-500' : percentage > 20 ? 'bg-amber-500' : 'bg-red-500'}`} style={{ width: `${percentage}%` }} />
+      <div
+        key={keg.id}
+        className={`${
+          isPosMode
+            ? 'bg-[#1a1d21] border-[#2c3138] shadow-2xl'
+            : 'bg-white dark:bg-[#1a1d21] border-slate-200 dark:border-[#2c3138]'
+        } border rounded-2xl p-5 flex flex-col justify-between relative overflow-hidden group hover:shadow-md transition-all`}
+      >
+        {/* Barra superior de progreso con gradiente Industrial Craft */}
+        <div className="fermentation-progress-track h-2 mb-4">
+          <div
+            className={
+              percentage <= 20
+                ? 'fermentation-progress-bar fermentation-progress-bar--alert'
+                : 'fermentation-progress-bar'
+            }
+            style={{ width: `${percentage}%` }}
+          />
         </div>
-        
-        <div className="flex justify-between items-start mb-4 mt-2">
+
+        <div className="flex justify-between items-start gap-3 mb-4">
           <div>
-            <h3 className={`font-bold font-display ${isPosMode ? 'text-zinc-100 text-3xl mb-1' : 'text-slate-800 dark:text-zinc-100 text-lg sm:text-xl'}`}>{keg.contents || 'Cerveza'}</h3>
-            <p className={`${isPosMode ? 'text-zinc-400 text-sm font-medium' : 'text-slate-500 dark:text-zinc-400 text-xs font-medium'}`}>Barril #{keg.id} {batch ? `• Lote ${batch.lotCode}` : ''}</p>
+            <div className="flex items-center gap-2 mb-1">
+              <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-[#10b981]/15 text-[#10b981] border border-[#10b981]/30">
+                <span className="w-1.5 h-1.5 rounded-full bg-[#10b981] animate-pulse" />
+                Canilla Activa
+              </span>
+              <span className="font-mono text-xs font-bold text-[#f59e0b]">
+                #{keg.id}
+              </span>
+            </div>
+            <h3
+              className={`font-black font-display tracking-tight ${
+                isPosMode
+                  ? 'text-white text-2xl sm:text-3xl'
+                  : 'text-slate-800 dark:text-white text-lg sm:text-xl'
+              }`}
+            >
+              {keg.contents || 'Cerveza Artesanal'}
+            </h3>
+            {batch && (
+              <p className="text-xs font-mono text-slate-500 dark:text-slate-400 mt-0.5">
+                Lote #{batch.lotCode} • {batch.style}
+              </p>
+            )}
           </div>
           {!isPosMode && (
-            <button 
+            <button
+              type="button"
               onClick={() => toggleKegTap(keg.id, false)}
-              className="p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/30 rounded-lg transition-colors"
-              title="Despinchar"
+              className="min-h-[44px] min-w-[44px] flex items-center justify-center text-slate-400 hover:bg-[#ef4444]/15 hover:text-[#ef4444] rounded-xl border border-transparent hover:border-[#ef4444]/30 transition-colors cursor-pointer"
+              title="Despinchar barril de la pizarra"
             >
               <X size={18} />
             </button>
           )}
         </div>
 
-        <div className={`mb-6 flex items-center gap-4 ${isPosMode ? 'text-base' : 'text-sm'}`}>
-          <div className="flex items-center gap-1.5 text-slate-600 dark:text-slate-300">
-            <Droplet size={isPosMode ? 20 : 16} className="text-blue-500" />
-            <span className="font-medium">{currentVol.toFixed(1)}L <span className="text-slate-400 text-xs font-normal">/ {keg.size}L</span></span>
+        <div className="grid grid-cols-2 gap-2.5 mb-5 p-3 rounded-xl bg-slate-50 dark:bg-[#121417] border border-slate-200/80 dark:border-[#2c3138] font-mono">
+          <div className="flex items-center gap-2 text-slate-700 dark:text-slate-200">
+            <Droplet size={16} className="text-[#38bdf8] shrink-0" />
+            <div>
+              <span className="block text-[9px] uppercase font-sans font-bold text-slate-400">
+                Restante
+              </span>
+              <span className="text-xs sm:text-sm font-bold">
+                {currentVol.toFixed(1)} L{' '}
+                <span className="text-slate-400 text-[11px] font-normal">
+                  / {keg.size}L
+                </span>
+              </span>
+            </div>
           </div>
-          <div className="flex items-center gap-1.5 text-slate-600 dark:text-slate-300">
-            <GlassWater size={isPosMode ? 20 : 16} className="text-amber-500" />
-            <span className="font-medium">~{pintasLeft} Pintas</span>
+          <div className="flex items-center gap-2 text-slate-700 dark:text-slate-200">
+            <GlassWater size={16} className="text-[#f59e0b] shrink-0" />
+            <div>
+              <span className="block text-[9px] uppercase font-sans font-bold text-slate-400">
+                Rendimiento
+              </span>
+              <span className="text-xs sm:text-sm font-bold text-[#f59e0b]">
+                ~{pintasLeft} pintas
+              </span>
+            </div>
           </div>
         </div>
 
-        {/* POS Buttons */}
-        <div className={`grid grid-cols-4 gap-2 mt-auto ${isPosMode ? 'h-32' : ''}`}>
+        {/* Botonera Táctil POS (>= 48px) */}
+        <div
+          className={`grid grid-cols-4 gap-2 mt-auto ${
+            isPosMode ? 'h-28' : ''
+          }`}
+        >
           <button
-            onClick={() => handleServe(keg.id, 0.33, 'Media Pinta', prices.media)}
-            className={`flex flex-col items-center justify-center p-2 rounded-xl transition-all active:scale-95 ${isPosMode ? 'bg-zinc-800 hover:bg-zinc-700 border border-zinc-700/80 text-zinc-100 shadow-sm hover:shadow-md' : 'bg-slate-50 dark:bg-zinc-800/50 border border-slate-200 dark:border-zinc-700/80 hover:border-amber-500 hover:text-amber-600 dark:hover:border-amber-500/50'}`}
+            type="button"
+            onClick={() =>
+              handleServe(keg.id, 0.33, 'Media Pinta', prices.media)
+            }
+            className={`min-h-[54px] flex flex-col items-center justify-center p-2 rounded-xl transition-all active:scale-95 cursor-pointer ${
+              isPosMode
+                ? 'bg-[#121417] hover:bg-[#22262b] border border-[#2c3138] text-white'
+                : 'bg-slate-50 dark:bg-[#121417] border border-slate-200 dark:border-[#2c3138] hover:border-[#d97706] text-slate-800 dark:text-slate-100'
+            }`}
           >
-            <span className={`${isPosMode ? 'text-lg' : 'text-[10px] uppercase tracking-wider'} font-bold mb-1`}>Media</span>
-            <span className={`${isPosMode ? 'text-sm font-mono' : 'text-[10px] font-mono'} opacity-70`}>${prices.media}</span>
+            <span
+              className={`${
+                isPosMode ? 'text-base' : 'text-[10px] uppercase tracking-wider'
+              } font-extrabold mb-0.5`}
+            >
+              Media
+            </span>
+            <span className="text-[11px] font-mono font-bold text-slate-500 dark:text-slate-400">
+              ${prices.media}
+            </span>
           </button>
+
           <button
+            type="button"
             onClick={() => handleServe(keg.id, 0.5, 'Pinta', prices.pinta)}
-            className={`flex flex-col items-center justify-center p-2 rounded-xl transition-all active:scale-95 ${isPosMode ? 'bg-copper hover:bg-copper-dark border border-transparent text-white shadow-lg shadow-copper/20' : 'bg-amber-50 dark:bg-copper/10 border border-amber-200 dark:border-copper/20 hover:bg-amber-100 dark:hover:bg-copper/20 text-amber-700 dark:text-copper-light'}`}
+            className="min-h-[54px] flex flex-col items-center justify-center p-2 rounded-xl bg-gradient-to-r from-[#d97706] to-[#f59e0b] hover:from-[#b45309] hover:to-[#d97706] text-white shadow-copper-glow transition-all active:scale-95 cursor-pointer"
           >
-            <span className={`${isPosMode ? 'text-xl' : 'text-[10px] uppercase tracking-wider'} font-bold mb-1`}>Pinta</span>
-            <span className={`${isPosMode ? 'text-sm font-mono' : 'text-[10px] font-mono'} opacity-90`}>${prices.pinta}</span>
+            <span
+              className={`${
+                isPosMode ? 'text-lg' : 'text-[10px] uppercase tracking-wider'
+              } font-black mb-0.5`}
+            >
+              Pinta
+            </span>
+            <span className="text-[11px] font-mono font-bold text-white/95">
+              ${prices.pinta}
+            </span>
           </button>
+
           <button
+            type="button"
             onClick={() => handleServe(keg.id, 1, 'Litro', prices.litro)}
-            className={`flex flex-col items-center justify-center p-2 rounded-xl transition-all active:scale-95 ${isPosMode ? 'bg-zinc-800 hover:bg-zinc-700 border border-zinc-700/80 text-zinc-100 shadow-sm hover:shadow-md' : 'bg-slate-50 dark:bg-zinc-800/50 border border-slate-200 dark:border-zinc-700/80 hover:border-amber-500 hover:text-amber-600 dark:hover:border-amber-500/50'}`}
+            className={`min-h-[54px] flex flex-col items-center justify-center p-2 rounded-xl transition-all active:scale-95 cursor-pointer ${
+              isPosMode
+                ? 'bg-[#121417] hover:bg-[#22262b] border border-[#2c3138] text-white'
+                : 'bg-slate-50 dark:bg-[#121417] border border-slate-200 dark:border-[#2c3138] hover:border-[#d97706] text-slate-800 dark:text-slate-100'
+            }`}
           >
-            <span className={`${isPosMode ? 'text-lg' : 'text-[10px] uppercase tracking-wider'} font-bold mb-1`}>Litro</span>
-            <span className={`${isPosMode ? 'text-sm font-mono' : 'text-[10px] font-mono'} opacity-70`}>${prices.litro}</span>
+            <span
+              className={`${
+                isPosMode ? 'text-base' : 'text-[10px] uppercase tracking-wider'
+              } font-extrabold mb-0.5`}
+            >
+              Litro
+            </span>
+            <span className="text-[11px] font-mono font-bold text-slate-500 dark:text-slate-400">
+              ${prices.litro}
+            </span>
           </button>
+
           <button
+            type="button"
             onClick={() => giftFromTap(keg.id, 0.5, 'Pinta')}
-            className={`flex flex-col items-center justify-center p-2 rounded-xl transition-all active:scale-95 ${isPosMode ? 'bg-indigo-600 hover:bg-indigo-500 border border-transparent text-white shadow-lg shadow-indigo-500/20' : 'bg-indigo-50 dark:bg-indigo-500/10 border border-indigo-200 dark:border-indigo-500/20 hover:bg-indigo-100 dark:hover:bg-indigo-500/20 text-indigo-700 dark:text-indigo-400'}`}
-            title="Regalar Pinta"
+            className="min-h-[54px] flex flex-col items-center justify-center p-2 rounded-xl bg-[#0ea5e9]/15 hover:bg-[#0ea5e9]/25 border border-[#0ea5e9]/35 text-[#38bdf8] transition-all active:scale-95 cursor-pointer"
+            title="Regalar Pinta (Cortesía)"
           >
-            <Gift size={isPosMode ? 24 : 16} className="mb-1" />
-            <span className={`${isPosMode ? 'text-sm' : 'text-[10px] uppercase tracking-wider'} font-bold`}>Regalo</span>
+            <Gift size={isPosMode ? 22 : 15} className="mb-0.5" />
+            <span className="text-[10px] uppercase tracking-wider font-extrabold">
+              Cortesía
+            </span>
           </button>
         </div>
       </div>
     );
   };
 
-  // The POS Overlay when Fullscreen
   if (isFullscreen) {
     return createPortal(
-      <div className="fixed inset-0 z-[9999] bg-zinc-950 overflow-y-auto p-8 animate-in fade-in">
+      <div className="fixed inset-0 z-[9999] bg-[#121417] overflow-y-auto p-6 sm:p-8 animate-fade-in">
         <div className="max-w-7xl mx-auto">
-          <div className="flex justify-between items-center mb-8 bg-zinc-900/50 p-6 rounded-2xl border border-zinc-800/80 backdrop-blur-md">
-            <h1 className="text-4xl font-black font-display text-transparent bg-clip-text bg-gradient-to-r from-copper to-orange-400 flex items-center gap-4">
-              <Beer size={40} className="text-copper" />
-              Pizarra BON
-            </h1>
-            <button 
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8 bg-[#1a1d21] p-6 rounded-2xl border border-[#2c3138] shadow-xl">
+            <div className="flex items-center gap-3.5">
+              <div className="w-12 h-12 rounded-2xl bg-[#d97706]/15 border border-[#d97706]/30 text-[#f59e0b] flex items-center justify-center">
+                <Beer size={28} />
+              </div>
+              <div>
+                <h1 className="text-2xl sm:text-3xl font-black font-display text-white tracking-tight">
+                  Pizarra Taproom BON
+                </h1>
+                <p className="text-xs font-mono text-slate-400">
+                  Modo Punto de Venta (POS Táctil) • {tappedKegs.length}{' '}
+                  canilla(s) activa(s)
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
               onClick={toggleFullscreen}
-              className="bg-zinc-800 text-zinc-300 p-3.5 rounded-xl font-bold hover:bg-zinc-700 hover:text-white transition-all shadow-md flex items-center gap-2 active:scale-95"
+              className="min-h-[48px] px-5 py-2.5 bg-[#22262b] hover:bg-[#2c3138] text-slate-200 hover:text-white border border-[#2c3138] rounded-xl text-xs font-bold uppercase tracking-wider flex items-center gap-2 transition-all active:scale-95 cursor-pointer"
             >
-              <Minimize size={20} /> Salir de Pantalla Completa
+              <Minimize size={18} />
+              <span>Salir de Pantalla Completa</span>
             </button>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-            {tappedKegs.map(keg => renderKegCard(keg, true))}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
+            {tappedKegs.map((keg) => renderKegCard(keg, true))}
             {tappedKegs.length === 0 && (
-              <div className="col-span-full py-20 text-center text-slate-500 text-xl border-2 border-dashed border-slate-700 rounded-3xl">
-                No hay ningún barril pinchado. Salí de pantalla completa para configurar.
+              <div className="col-span-full py-20 text-center text-slate-400 text-base border border-dashed border-[#2c3138] bg-[#1a1d21]/60 rounded-3xl">
+                No hay ningún barril pinchado en canilla. Salí de pantalla completa para pinchar un barril.
               </div>
             )}
           </div>
@@ -152,120 +290,212 @@ export const Taproom: React.FC = () => {
     );
   }
 
-  // Normal View
   return (
-    <div className="space-y-6">
-      <div className="bg-white dark:bg-zinc-900/40 p-6 rounded-2xl shadow-sm border border-slate-200 dark:border-zinc-800/80 backdrop-blur-md">
+    <div className="space-y-6 pb-20">
+      {/* HEADER & CONFIGURACIÓN DE PRECIOS */}
+      <div className="bg-white dark:bg-[#1a1d21] p-6 rounded-2xl shadow-sm border border-slate-200 dark:border-[#2c3138]">
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
-          <h2 className="text-xl sm:text-2xl font-bold text-slate-800 dark:text-zinc-100 flex items-center gap-2">
-            <Beer className="text-copper" size={28} />
-            Pizarra / Eventos
-          </h2>
-          <button 
-            onClick={toggleFullscreen}
-            className="flex items-center gap-2 px-5 py-2.5 bg-slate-900 dark:bg-copper-dark text-white text-sm font-bold rounded-xl hover:bg-slate-800 dark:hover:bg-copper transition-all shadow-md active:scale-95 w-full sm:w-auto justify-center"
-          >
-            <Maximize size={18} /> Modo POS (Pantalla Completa)
-          </button>
-        </div>
-        
-        {/* Price Configuration */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6 bg-slate-50 dark:bg-zinc-800/50 p-5 rounded-2xl border border-slate-100 dark:border-zinc-700/50">
           <div>
-            <label className="block text-xs font-bold text-slate-500 dark:text-zinc-400 mb-1.5 uppercase tracking-wider">Precio Media <span className="text-slate-400 dark:text-zinc-500 font-normal normal-case">(330ml)</span></label>
+            <h2 className="text-2xl font-black font-display tracking-tight text-slate-800 dark:text-white flex items-center gap-2.5">
+              <GlassWater className="text-[#f59e0b]" size={26} />
+              Pizarra / Taproom & Eventos
+            </h2>
+            <p className="text-sm text-slate-500 dark:text-slate-400">
+              Despacho rápido de pintas en barra con descuento automático de litros en barril.
+            </p>
+          </div>
+          <div className="flex items-center gap-2.5 w-full sm:w-auto">
+            <button
+              type="button"
+              onClick={() => setIsModalOpen(true)}
+              className="flex-1 sm:flex-initial min-h-[44px] px-4 py-2.5 bg-slate-100 dark:bg-[#22262b] hover:bg-slate-200 dark:hover:bg-[#2c3138] text-slate-800 dark:text-white border border-slate-200 dark:border-[#2c3138] rounded-xl text-xs font-bold uppercase tracking-wider flex items-center justify-center gap-2 transition active:scale-95 cursor-pointer"
+            >
+              <Plus size={17} className="text-[#f59e0b]" />
+              <span>Pinchar Barril</span>
+            </button>
+            <button
+              type="button"
+              onClick={toggleFullscreen}
+              className="flex-1 sm:flex-initial min-h-[44px] px-5 py-2.5 bg-gradient-to-r from-[#d97706] to-[#f59e0b] hover:from-[#b45309] hover:to-[#d97706] text-white text-xs font-bold uppercase tracking-wider rounded-xl shadow-copper-glow transition-all active:scale-95 flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <Maximize size={17} />
+              <span>Modo POS</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Tarifario de Barra (Monospace Inputs >= 44px) */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6 bg-slate-50 dark:bg-[#121417] p-4 rounded-2xl border border-slate-200 dark:border-[#2c3138]">
+          <div>
+            <label className="block text-[10px] font-bold text-slate-500 dark:text-slate-400 mb-1.5 uppercase tracking-wider">
+              Precio Media Pinta{' '}
+              <span className="font-mono text-slate-400">(330 mL)</span>
+            </label>
             <div className="relative">
-              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-zinc-500 font-bold">$</span>
-              <input 
-                type="number" 
+              <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[#f59e0b] font-mono font-bold">
+                $
+              </span>
+              <input
+                type="number"
                 value={prices.media}
-                onChange={e => setPrices({...prices, media: Number(e.target.value)})}
-                className="w-full pl-8 pr-3 py-2.5 bg-white dark:bg-zinc-900 border border-slate-200 dark:border-zinc-700/80 rounded-xl text-sm font-mono font-bold focus:ring-2 focus:ring-copper/50 outline-none transition-all"
+                onChange={(e) =>
+                  setPrices({ ...prices, media: Number(e.target.value) })
+                }
+                className="w-full min-h-[44px] pl-8 pr-3 py-2 bg-white dark:bg-[#1a1d21] border border-slate-200 dark:border-[#2c3138] rounded-xl text-sm font-mono font-bold text-slate-900 dark:text-white focus:ring-2 focus:ring-[#d97706]/60 outline-none transition-all"
               />
             </div>
           </div>
           <div>
-            <label className="block text-xs font-bold text-slate-500 dark:text-zinc-400 mb-1.5 uppercase tracking-wider">Precio Pinta <span className="text-slate-400 dark:text-zinc-500 font-normal normal-case">(500ml)</span></label>
+            <label className="block text-[10px] font-bold text-slate-500 dark:text-slate-400 mb-1.5 uppercase tracking-wider">
+              Precio Pinta{' '}
+              <span className="font-mono text-slate-400">(500 mL)</span>
+            </label>
             <div className="relative">
-              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-zinc-500 font-bold">$</span>
-              <input 
-                type="number" 
+              <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[#f59e0b] font-mono font-bold">
+                $
+              </span>
+              <input
+                type="number"
                 value={prices.pinta}
-                onChange={e => setPrices({...prices, pinta: Number(e.target.value)})}
-                className="w-full pl-8 pr-3 py-2.5 bg-white dark:bg-zinc-900 border border-slate-200 dark:border-zinc-700/80 rounded-xl text-sm font-mono font-bold focus:ring-2 focus:ring-copper/50 outline-none transition-all"
+                onChange={(e) =>
+                  setPrices({ ...prices, pinta: Number(e.target.value) })
+                }
+                className="w-full min-h-[44px] pl-8 pr-3 py-2 bg-white dark:bg-[#1a1d21] border border-slate-200 dark:border-[#2c3138] rounded-xl text-sm font-mono font-bold text-slate-900 dark:text-white focus:ring-2 focus:ring-[#d97706]/60 outline-none transition-all"
               />
             </div>
           </div>
           <div>
-            <label className="block text-xs font-bold text-slate-500 dark:text-zinc-400 mb-1.5 uppercase tracking-wider">Precio Litro <span className="text-slate-400 dark:text-zinc-500 font-normal normal-case">(1L)</span></label>
+            <label className="block text-[10px] font-bold text-slate-500 dark:text-slate-400 mb-1.5 uppercase tracking-wider">
+              Precio Litro / Recarga{' '}
+              <span className="font-mono text-slate-400">(1000 mL)</span>
+            </label>
             <div className="relative">
-              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-zinc-500 font-bold">$</span>
-              <input 
-                type="number" 
+              <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[#f59e0b] font-mono font-bold">
+                $
+              </span>
+              <input
+                type="number"
                 value={prices.litro}
-                onChange={e => setPrices({...prices, litro: Number(e.target.value)})}
-                className="w-full pl-8 pr-3 py-2.5 bg-white dark:bg-zinc-900 border border-slate-200 dark:border-zinc-700/80 rounded-xl text-sm font-mono font-bold focus:ring-2 focus:ring-copper/50 outline-none transition-all"
+                onChange={(e) =>
+                  setPrices({ ...prices, litro: Number(e.target.value) })
+                }
+                className="w-full min-h-[44px] pl-8 pr-3 py-2 bg-white dark:bg-[#1a1d21] border border-slate-200 dark:border-[#2c3138] rounded-xl text-sm font-mono font-bold text-slate-900 dark:text-white focus:ring-2 focus:ring-[#d97706]/60 outline-none transition-all"
               />
             </div>
           </div>
         </div>
 
-        {/* Tapped Kegs Grid */}
+        {/* Grilla de Canillas Activas */}
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {tappedKegs.map(keg => renderKegCard(keg, false))}
+          {tappedKegs.map((keg) => renderKegCard(keg, false))}
 
-          {/* Add Tap Button */}
+          {/* Tarjeta para Pinchar Nuevo Barril */}
           <button
+            type="button"
             onClick={() => setIsModalOpen(true)}
-            className="border-2 border-dashed border-slate-200 dark:border-zinc-700/80 rounded-2xl p-6 flex flex-col items-center justify-center text-slate-500 hover:text-copper hover:border-copper/50 dark:hover:border-copper/50 transition-all min-h-[200px] hover:bg-slate-50 dark:hover:bg-zinc-800/30 group"
+            className="border-2 border-dashed border-slate-200 dark:border-[#2c3138] rounded-2xl p-6 flex flex-col items-center justify-center text-slate-500 dark:text-slate-400 hover:text-[#f59e0b] hover:border-[#d97706]/60 transition-all min-h-[220px] hover:bg-slate-50 dark:hover:bg-[#121417]/60 group cursor-pointer"
           >
-            <div className="w-14 h-14 bg-slate-100 dark:bg-zinc-800 rounded-full flex items-center justify-center mb-4 group-hover:bg-copper/10 group-hover:text-copper transition-colors">
-              <Plus size={28} />
+            <div className="w-14 h-14 bg-slate-100 dark:bg-[#121417] border border-slate-200 dark:border-[#2c3138] rounded-2xl flex items-center justify-center mb-3 group-hover:bg-[#d97706]/15 group-hover:border-[#d97706]/40 group-hover:text-[#f59e0b] transition-colors">
+              <Plus size={26} />
             </div>
-            <span className="font-medium">Pinchar Barril</span>
+            <span className="font-extrabold text-sm text-slate-700 dark:text-slate-200 group-hover:text-[#f59e0b]">
+              Pinchar Barril en Canilla
+            </span>
+            <span className="text-xs text-slate-400 mt-1">
+              {availableKegs.length} barril(es) lleno(s) en cámara
+            </span>
           </button>
         </div>
       </div>
 
-      {/* Modal to Select Keg */}
-      {isModalOpen && createPortal(
-        <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-md flex items-center justify-center z-[100] p-4 animate-in fade-in">
-          <div className="bg-white dark:bg-zinc-900 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl border border-slate-200 dark:border-zinc-800/80">
-            <div className="p-5 border-b border-slate-200 dark:border-zinc-800/80 flex justify-between items-center bg-slate-50 dark:bg-zinc-800/50">
-              <h3 className="font-bold font-display text-lg text-slate-800 dark:text-zinc-100">Seleccionar Barril Lleno</h3>
-              <button onClick={() => setIsModalOpen(false)} className="p-1 rounded-lg hover:bg-slate-200 dark:hover:bg-zinc-700/50 transition-colors">
-                <X size={20} className="text-slate-400 dark:text-zinc-500 hover:text-slate-600 dark:hover:text-zinc-300" />
-              </button>
+      {/* MODAL PINCHAR BARRIL (ESTÉTICA INDUSTRIAL CRAFT + UNA SOLA MANO) */}
+      {isModalOpen &&
+        createPortal(
+          <div className="fixed inset-0 z-[100] bg-black/75 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
+            <div className="bg-white dark:bg-[#1a1d21] rounded-t-3xl sm:rounded-2xl max-w-md w-full border-t sm:border border-slate-200 dark:border-[#2c3138] p-6 pb-8 sm:pb-6 shadow-2xl animate-scale-in max-h-[90vh] flex flex-col">
+              <div className="flex justify-between items-center mb-4 pb-3 border-b border-slate-200 dark:border-[#2c3138] shrink-0">
+                <h3 className="font-extrabold text-lg text-slate-900 dark:text-white flex items-center gap-2">
+                  <Beer className="text-[#f59e0b]" size={20} />
+                  <span>Pinchar Barril en Pizarra</span>
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setIsModalOpen(false)}
+                  className="min-h-[44px] min-w-[44px] flex items-center justify-center text-slate-400 hover:text-slate-700 dark:hover:text-white rounded-xl hover:bg-slate-100 dark:hover:bg-[#22262b] transition cursor-pointer"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              <p className="text-xs text-slate-500 dark:text-slate-400 mb-4 shrink-0">
+                Seleccioná uno de los barriles llenos en cámara de frío para conectarlo a una canilla activa:
+              </p>
+
+              <div className="space-y-2.5 overflow-y-auto pr-0.5 custom-scrollbar flex-1">
+                {availableKegs.length === 0 ? (
+                  <div className="p-6 bg-slate-50 dark:bg-[#121417] border border-dashed border-slate-200 dark:border-[#2c3138] rounded-2xl text-center">
+                    <Beer
+                      size={28}
+                      className="mx-auto mb-2 text-slate-400 opacity-50"
+                    />
+                    <p className="text-xs font-bold text-slate-700 dark:text-slate-200">
+                      No hay barriles llenos disponibles en planta
+                    </p>
+                    <p className="text-[11px] text-slate-400 mt-1">
+                      Primero llená un barril desde un lote terminado en la pestaña Barriles.
+                    </p>
+                  </div>
+                ) : (
+                  availableKegs.map((keg) => {
+                    const currentVol = keg.currentVolume ?? keg.size;
+                    return (
+                      <button
+                        key={keg.id}
+                        type="button"
+                        onClick={() => {
+                          toggleKegTap(keg.id, true);
+                          setIsModalOpen(false);
+                        }}
+                        className="w-full min-h-[60px] text-left p-3.5 rounded-xl bg-slate-50 dark:bg-[#121417] border border-slate-200 dark:border-[#2c3138] hover:border-[#d97706] dark:hover:border-[#f59e0b] hover:bg-amber-50/30 dark:hover:bg-[#22262b] transition-all flex justify-between items-center gap-3 group cursor-pointer"
+                      >
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono font-black text-sm text-[#f59e0b]">
+                              #{keg.id}
+                            </span>
+                            <span className="font-extrabold text-sm text-slate-800 dark:text-white">
+                              {keg.contents || 'Cerveza'}
+                            </span>
+                          </div>
+                          <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400 mt-0.5">
+                            Ubicación: {keg.currentLocation} • Disponible:{' '}
+                            <strong className="text-[#10b981]">
+                              {currentVol} L / {keg.size} L
+                            </strong>
+                          </div>
+                        </div>
+                        <div className="w-9 h-9 rounded-xl bg-[#d97706]/15 text-[#f59e0b] border border-[#d97706]/30 flex items-center justify-center group-hover:bg-[#d97706] group-hover:text-white transition-colors shrink-0">
+                          <CheckCircle2 size={18} />
+                        </div>
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+
+              <div className="flex gap-3 pt-4 mt-5 border-t border-slate-200 dark:border-[#2c3138] shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setIsModalOpen(false)}
+                  className="w-full min-h-[48px] border border-slate-200 dark:border-[#2c3138] text-slate-600 dark:text-slate-300 rounded-xl text-xs font-bold uppercase tracking-wider hover:bg-slate-50 dark:hover:bg-[#22262b] transition cursor-pointer"
+                >
+                  Cerrar
+                </button>
+              </div>
             </div>
-            <div className="p-4 max-h-[60vh] overflow-y-auto space-y-2 custom-scrollbar">
-              {availableKegs.length === 0 ? (
-                <p className="text-center text-slate-500 dark:text-zinc-500 py-10 font-medium">No hay barriles llenos disponibles en fábrica.</p>
-              ) : (
-                availableKegs.map(keg => (
-                  <button
-                    key={keg.id}
-                    onClick={() => {
-                      toggleKegTap(keg.id, true);
-                      setIsModalOpen(false);
-                    }}
-                    className="w-full text-left p-4 rounded-xl border border-slate-200 dark:border-zinc-700/80 hover:border-copper hover:shadow-md dark:hover:border-copper/50 hover:bg-slate-50 dark:hover:bg-zinc-800/50 transition-all flex justify-between items-center group"
-                  >
-                    <div>
-                      <div className="font-bold text-slate-800 dark:text-white">
-                        Barril #{keg.id} {keg.contents ? `- ${keg.contents}` : ''}
-                      </div>
-                      <div className="text-xs text-slate-500">
-                        {keg.currentVolume ?? keg.size}L / {keg.size}L
-                      </div>
-                    </div>
-                    <Plus size={18} className="text-slate-400" />
-                  </button>
-                ))
-              )}
-            </div>
-          </div>
-        </div>,
-        document.body
-      )}
+          </div>,
+          document.body
+        )}
     </div>
   );
 };

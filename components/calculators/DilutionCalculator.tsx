@@ -1,40 +1,69 @@
-import React, { useState } from 'react';
-import { SectionCard, InputGroup, ResultCard, WATER_PROFILES } from './Shared';
-import { Info, Flame, Trash2, PlusCircle, Check } from 'lucide-react';
-import { DebouncedInput } from '../ui/DebouncedInput';
+import React, { useState, useMemo } from 'react';
+import { SectionCard, InputGroup, ResultCard } from './Shared';
+import {
+  calculateDilutionWater,
+  sanitizeGravity,
+  sanitizePositiveNumber,
+} from '../../lib/brewmath';
+import { useCalculatorPrefill, prefillNum } from '../../services/ai/calculatorBridge';
 
-export const DilutionCalculator = () => {
-  const [currentGravDil, setCurrentGravDil] = useState<number>(1.060);
-const [currentVolDil, setCurrentVolDil] = useState<number>(200);
-const [targetGravDil, setTargetGravDil] = useState<number>(1.050);
+export const DilutionCalculator: React.FC = () => {
+  const prefill = useCalculatorPrefill('DILUTION');
+  const [currentGravDil, setCurrentGravDil] = useState<number>(() => prefillNum(prefill, 'currentGravity', 1.060));
+  const [currentVolDil, setCurrentVolDil] = useState<number>(() => prefillNum(prefill, 'currentVolumeL', 200));
+  const [targetGravDil, setTargetGravDil] = useState<number>(() => prefillNum(prefill, 'targetGravity', 1.050));
 
-  const calculateDilution = () => {
-    const p1 = (currentGravDil - 1) * 1000;
-    const p2 = (targetGravDil - 1) * 1000;
-    if (p2 <= 0) return '0';
-    const finalVol = (p1 * currentVolDil) / p2;
-    return (finalVol - currentVolDil).toFixed(1);
-  };
+  React.useEffect(() => {
+    if (typeof prefill.currentGravity === 'number') setCurrentGravDil(prefill.currentGravity);
+    if (typeof prefill.currentVolumeL === 'number') setCurrentVolDil(prefill.currentVolumeL);
+    if (typeof prefill.targetGravity === 'number') setTargetGravDil(prefill.targetGravity);
+  }, [prefill]);
 
-  
+  const waterToAdd = useMemo(
+    () =>
+      calculateDilutionWater(currentGravDil, currentVolDil, targetGravDil),
+    [currentGravDil, currentVolDil, targetGravDil]
+  );
+
   return (
-          <>
-             <div className="mb-4 text-sm text-zinc-700/80 dark:text-zinc-400">
-               ¿Te pasaste de densidad? Calcula cuánta agua agregar.
-             </div>
-             
-             <SectionCard title="Estado Actual">
-                <div className="grid grid-cols-2 gap-4">
-                    <InputGroup label="Densidad Actual" value={currentGravDil} onChange={setCurrentGravDil} step="0.001" />
-                    <InputGroup label="Volumen Actual" value={currentVolDil} onChange={setCurrentVolDil} unit="L" />
-                </div>
-             </SectionCard>
+    <>
+      <div className="mb-4 text-sm text-zinc-700/80 dark:text-zinc-400">
+        ¿Te pasaste de densidad? Calcula cuánta agua tratada/declorada agregar.
+      </div>
 
-             <SectionCard title="Objetivo">
-                <InputGroup label="Densidad Deseada" value={targetGravDil} onChange={setTargetGravDil} step="0.001" />
-             </SectionCard>
+      <SectionCard title="Estado Actual">
+        <div className="grid grid-cols-2 gap-4">
+          <InputGroup
+            label="Densidad Actual"
+            value={currentGravDil}
+            onChange={(v) => setCurrentGravDil(sanitizeGravity(v, 1.06))}
+            step="0.001"
+          />
+          <InputGroup
+            label="Volumen Actual"
+            value={currentVolDil}
+            onChange={(v) => setCurrentVolDil(sanitizePositiveNumber(v, 200))}
+            unit="L"
+          />
+        </div>
+      </SectionCard>
 
-            <ResultCard title="Agregar Agua" value={calculateDilution()} unit="Litros" colorClass="text-sky-400" />
-          </>
-        );
+      <SectionCard title="Objetivo">
+        <InputGroup
+          label="Densidad Deseada"
+          value={targetGravDil}
+          onChange={(v) => setTargetGravDil(sanitizeGravity(v, 1.05))}
+          step="0.001"
+        />
+      </SectionCard>
+
+      <ResultCard
+        title="Agregar Agua"
+        value={waterToAdd.toFixed(1)}
+        unit="Litros"
+        subtext={`Volumen Final: ${(currentVolDil + waterToAdd).toFixed(1)} L`}
+        colorClass="text-sky-400"
+      />
+    </>
+  );
 };

@@ -12,7 +12,8 @@ import {
   MasterRecipe, CalendarEvent, FermentationLog, SensoryProfile, QualityLog,
   BatchStatus, CostItem, BrewSession, Fermenter, FermenterStatus
 } from '../types';
-import { dbGet, dbSet } from '../context/db';
+import * as dbLayer from '../context/db';
+const { dbGet, dbSet } = dbLayer;
 import { isFinishedBatch, validateFermenterAssignment } from '../lib/fermenterIntegrity';
 
 // ============================================================================
@@ -150,17 +151,30 @@ export interface BreweryStore {
 const pendingSaves = new Map<string, ReturnType<typeof setTimeout>>();
 
 function scheduleSave(key: string, value: unknown): void {
+  if (typeof dbLayer.scheduleTransactionalSave === 'function') {
+    dbLayer.scheduleTransactionalSave({ [key]: value });
+    return;
+  }
   const existing = pendingSaves.get(key);
   if (existing) clearTimeout(existing);
   
   pendingSaves.set(key, setTimeout(() => {
-    if (typeof requestIdleCallback !== 'undefined') {
-      requestIdleCallback(() => dbSet(key, value), { timeout: 2000 });
-    } else {
-      setTimeout(() => dbSet(key, value), 0);
-    }
+    void dbSet(key, value);
     pendingSaves.delete(key);
-  }, 500));
+  }, 300));
+}
+
+function scheduleAcidMultiSave(
+  entries: Record<string, unknown>,
+  acidCallback?: () => Promise<boolean>
+): void {
+  if (acidCallback && typeof dbLayer.dbCommitTransaction === 'function') {
+    void acidCallback();
+    return;
+  }
+  for (const [k, v] of Object.entries(entries)) {
+    scheduleSave(k, v);
+  }
 }
 
 // ============================================================================
@@ -268,6 +282,9 @@ export const useBreweryStore = create<BreweryStore>()((set, get) => ({
       return;
     }
     set(state => {
+      if (state.batches.some(b => b.id === batch.id)) {
+        throw new Error('Ya existe un lote con ese ID.');
+      }
       if (batch.fermenterId) validateFermenterAssignment(batch, batch.fermenterId, state.batches, state.fermenters);
       const volumeAvailable = batch.status === BatchStatus.PACKAGED ? batch.volumePackaged : 0;
       const shouldDiscount = batch.ingredientsDiscounted !== false; // default true unless explicitly false
@@ -313,8 +330,26 @@ export const useBreweryStore = create<BreweryStore>()((set, get) => ({
       };
       const next = [newBatch, ...state.batches];
 
-      scheduleSave('batches', next);
-      if (nextInventory !== state.inventory) scheduleSave('inventory', nextInventory);
+      scheduleAcidMultiSave(
+        { batches: next, inventory: nextInventory, fermenters: nextFermenters },
+        typeof dbLayer.txConsumeIngredientsForBatch === 'function'
+          ? () =>
+              dbLayer.txConsumeIngredientsForBatch({
+                batches: next,
+                inventory: nextInventory,
+                fermenters: nextFermenters,
+                batchId: newBatch.id,
+                lotCode: newBatch.lotCode,
+                deltas: (batch.ingredientsUsed || []).map((u) => ({
+                  collection: 'inventory' as const,
+                  itemId: u.inventoryId,
+                  previousValue: state.inventory.find((i) => i.id === u.inventoryId)?.stockAmount ?? 0,
+                  newValue: nextInventory.find((i) => i.id === u.inventoryId)?.stockAmount ?? 0,
+                  unit: u.unit,
+                })),
+              })
+          : undefined
+      );
       return { batches: next, inventory: nextInventory, fermenters: nextFermenters };
     });
   },
@@ -327,6 +362,7 @@ export const useBreweryStore = create<BreweryStore>()((set, get) => ({
 
       const currentBatch = state.batches.find(b => b.id === id);
       if (!currentBatch) throw new Error('El lote no existe.');
+      if (updates.id && updates.id !== id) throw new Error('No se puede cambiar el ID del lote.');
       const candidate = { ...currentBatch, ...updates };
       if (candidate.fermenterId && (!isFinishedBatch(candidate) || !!updates.fermenterId)) {
         validateFermenterAssignment(candidate, candidate.fermenterId, state.batches, state.fermenters);
@@ -417,13 +453,32 @@ export const useBreweryStore = create<BreweryStore>()((set, get) => ({
         }
       }
 
+      if (nextInventory !== state.inventory) {
+        scheduleAcidMultiSave(
+          { batches: next, inventory: nextInventory, fermenters: nextFermenters },
+          typeof dbLayer.txConsumeIngredientsForBatch === 'function'
+            ? () =>
+                dbLayer.txConsumeIngredientsForBatch({
+                  batches: next,
+                  inventory: nextInventory,
+                  fermenters: nextFermenters,
+                  batchId: currentBatch.id,
+                  lotCode: currentBatch.lotCode,
+                  deltas: (currentBatch.ingredientsUsed || []).map((u) => ({
+                    collection: 'inventory' as const,
+                    itemId: u.inventoryId,
+                    previousValue: state.inventory.find((i) => i.id === u.inventoryId)?.stockAmount ?? 0,
+                    newValue: nextInventory.find((i) => i.id === u.inventoryId)?.stockAmount ?? 0,
+                    unit: u.unit,
+                  })),
+                })
+            : undefined
+        );
+        return { batches: next, inventory: nextInventory, fermenters: nextFermenters };
+      }
       scheduleSave('batches', next);
       if (fermentersModified) {
         scheduleSave('fermenters', nextFermenters);
-      }
-      if (nextInventory !== state.inventory) {
-        scheduleSave('inventory', nextInventory);
-        return { batches: next, inventory: nextInventory, fermenters: nextFermenters };
       }
       return { batches: next, fermenters: nextFermenters };
     });
@@ -605,10 +660,19 @@ export const useBreweryStore = create<BreweryStore>()((set, get) => ({
   addFermenter: (fermenter) => {
     if (!fermenter || typeof fermenter !== 'object') return;
     set(state => {
-      const id = fermenter.id || `F-${Date.now().toString().slice(-4)}`;
+      const id = fermenter.id || (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `F-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
+      if (state.fermenters.some(f => f.id === id)) {
+        throw new Error('Ya existe un fermentador con ese ID.');
+      }
+      if (fermenter.status === 'OCCUPIED' || !!fermenter.currentBatchId) {
+        const assigned = state.batches.find(b => b.id === fermenter.currentBatchId && b.fermenterId === id && !isFinishedBatch(b));
+        if (!assigned) {
+          throw new Error('No se puede crear un fermentador ocupado sin asignación recíproca.');
+        }
+      }
       const newFermenter: Fermenter = {
         id,
-        name: fermenter.name.trim(),
+        name: (fermenter.name || '').trim(),
         capacity: Number(fermenter.capacity) || 300,
         status: fermenter.status || 'AVAILABLE',
         notes: fermenter.notes?.trim() || '',
@@ -797,8 +861,23 @@ export const useBreweryStore = create<BreweryStore>()((set, get) => ({
       const nextBatches = state.batches.map(b =>
         b.id === batch.id ? { ...b, volumeAvailable: newBatchVolume, status: newStatus, ...(newStatus === BatchStatus.COMPLETED ? { fermenterId: undefined, fermenterName: undefined } : {}) } : b
       );
-      scheduleSave('kegs', nextKegs);
-      scheduleSave('batches', nextBatches);
+      scheduleAcidMultiSave(
+        { kegs: nextKegs, batches: nextBatches, fermenters: nextFermenters },
+        typeof dbLayer.txPackageBatchToKeg === 'function'
+          ? () =>
+              dbLayer.txPackageBatchToKeg({
+                kegs: nextKegs,
+                batches: nextBatches,
+                fermenters: nextFermenters,
+                kegId,
+                batchId: batch.id,
+                lotCode: batch.lotCode,
+                litersPackaged: amountToFill,
+                previousBatchVolume: batchAvailable,
+                newBatchVolume,
+              })
+          : undefined
+      );
       return { kegs: nextKegs, batches: nextBatches, fermenters: nextFermenters };
     });
   },
@@ -838,9 +917,23 @@ export const useBreweryStore = create<BreweryStore>()((set, get) => ({
         );
       }
 
-      scheduleSave('bottles', nextBottles);
-      scheduleSave('inventory', nextInventory);
-      scheduleSave('kegs', nextKegs);
+      scheduleAcidMultiSave(
+        { bottles: nextBottles, inventory: nextInventory, kegs: nextKegs },
+        typeof dbLayer.txBottleFromKeg === 'function'
+          ? () =>
+              dbLayer.txBottleFromKeg({
+                bottles: nextBottles,
+                kegs: nextKegs,
+                inventory: nextInventory,
+                kegId,
+                bottleStockId: newStock.id,
+                lotCode,
+                previousKegVolume: currentKegVolume,
+                newKegVolume,
+                bottlesCreated: quantity,
+              })
+          : undefined
+      );
       return { bottles: nextBottles, inventory: nextInventory, kegs: nextKegs };
     });
   },
@@ -902,8 +995,29 @@ export const useBreweryStore = create<BreweryStore>()((set, get) => ({
 
       const nextSales = [newSale, ...state.sales];
 
-      scheduleSave('kegs', nextKegs);
-      scheduleSave('sales', nextSales);
+      scheduleAcidMultiSave(
+        { kegs: nextKegs, sales: nextSales },
+        typeof dbLayer.txTaproomOrCommercialSale === 'function'
+          ? () =>
+              dbLayer.txTaproomOrCommercialSale({
+                kegs: nextKegs,
+                sales: nextSales,
+                entityId: newSale.id,
+                lotCode: newSale.lotCode,
+                operation: 'TAPROOM_SALE',
+                description: newSale.description,
+                deltas: [
+                  {
+                    collection: 'kegs',
+                    itemId: kegId,
+                    previousValue: currentVol,
+                    newValue: newVol,
+                    unit: 'L',
+                  },
+                ],
+              })
+          : undefined
+      );
 
       return { kegs: nextKegs, sales: nextSales };
     });

@@ -43,13 +43,30 @@ import {
   ArrowLeft,
   Beaker
 } from 'lucide-react';
+import { CALCULATOR_OPEN_EVENT, peekPendingCalculator } from '../services/ai/calculatorBridge';
 
 type CalculatorType = 'MENU' | 'IBU' | 'ABV' | 'PITCH' | 'DENSITY' | 'STRIKE' | 'WATER_CHEM' | 'DILUTION' | 'CARB' | 'KETTLE' | 'SPARGE' | 'EFFICIENCY' | 'RECIPE' | 'ACID' | 'REFRACTOMETER' | 'COLOR' | 'PRIMING' | 'STARTER' | 'DRY_HOP' | 'COLD_CRASH' | 'CALORIES' | 'EQUIPMENT' | 'PARTIGYLE';
 
-
-
 export const Calculators: React.FC = React.memo(() => {
-  const [activeView, setActiveView] = useState<CalculatorType>('MENU');
+  const [activeView, setActiveView] = useState<CalculatorType>(() => {
+    const pending = peekPendingCalculator();
+    return pending ? (pending.type as CalculatorType) : 'MENU';
+  });
+
+  // Se incrementa en cada apertura desde la IA para forzar el re-montaje de la calculadora
+  // (los valores precargados se leen solo al montar).
+  const [openNonce, setOpenNonce] = useState(0);
+
+  React.useEffect(() => {
+    const handleOpen = (e: any) => {
+      if (e.detail?.type) {
+        setActiveView(e.detail.type as CalculatorType);
+        setOpenNonce((n) => n + 1);
+      }
+    };
+    window.addEventListener(CALCULATOR_OPEN_EVENT, handleOpen);
+    return () => window.removeEventListener(CALCULATOR_OPEN_EVENT, handleOpen);
+  }, []);
 
   // --- MAIN MENU RENDER ---
   
@@ -190,7 +207,7 @@ export const Calculators: React.FC = React.memo(() => {
        </h2>
 
       <div className="animate-in fade-in slide-in-from-bottom-4 duration-300">
-           <div className="p-1">
+           <div className="p-1" key={`${activeView}-${openNonce}`}>
                {renderToolContent()}
            </div>
       </div>

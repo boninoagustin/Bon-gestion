@@ -1,31 +1,57 @@
-import React, { useState } from 'react';
-import { SectionCard, InputGroup, ResultCard, WATER_PROFILES } from './Shared';
-import { Info, Flame, Trash2, PlusCircle, Check } from 'lucide-react';
-import { DebouncedInput } from '../ui/DebouncedInput';
+import React, { useState, useMemo, useEffect } from 'react';
+import { SectionCard, InputGroup, ResultCard } from './Shared';
+import {
+  calculateKettleVolume,
+  sanitizePositiveNumber,
+} from '../../lib/brewmath';
+import { useCalculatorPrefill, prefillNum } from '../../services/ai/calculatorBridge';
 
-export const KettleCalculator = () => {
-  const [kettleDiameter, setKettleDiameter] = useState<number>(60);
-  const [liquidHeight, setLiquidHeight] = useState<number>(50);
+export const KettleCalculator: React.FC = () => {
+  const prefill = useCalculatorPrefill('KETTLE');
+  const [kettleDiameter, setKettleDiameter] = useState<number>(() => prefillNum(prefill, 'diameterCm', 60));
+  const [liquidHeight, setLiquidHeight] = useState<number>(() => prefillNum(prefill, 'liquidHeightCm', 50));
 
-  const calculateKettleVol = () => {
-    const radius = kettleDiameter / 2;
-    const vol = (Math.PI * Math.pow(radius, 2) * liquidHeight) / 1000;
-    return vol.toFixed(1);
-  };
+  useEffect(() => {
+    if (typeof prefill.diameterCm === 'number') {
+      setKettleDiameter(prefill.diameterCm);
+    }
+    if (typeof prefill.liquidHeightCm === 'number') {
+      setLiquidHeight(prefill.liquidHeightCm);
+    }
+  }, [prefill]);
 
-  
+  const volumeL = useMemo(
+    () => calculateKettleVolume(kettleDiameter, liquidHeight),
+    [kettleDiameter, liquidHeight]
+  );
+
   return (
-          <>
-            <div className="mb-4 text-sm text-zinc-700/80 dark:text-zinc-400">
-               Mide con una regla la altura del líquido en tu olla.
-            </div>
-            <SectionCard title="Dimensiones">
-                <div className="grid grid-cols-2 gap-4">
-                  <InputGroup label="Diámetro Olla" value={kettleDiameter} onChange={setKettleDiameter} unit="cm" />
-                  <InputGroup label="Altura Líquido" value={liquidHeight} onChange={setLiquidHeight} unit="cm" />
-                </div>
-            </SectionCard>
-            <ResultCard title="Volumen Actual" value={calculateKettleVol()} unit="Litros" colorClass="text-orange-400" />
-          </>
-        );
+    <>
+      <div className="mb-4 text-sm text-zinc-700/80 dark:text-zinc-400">
+        Mide con una regla la altura del líquido en tu olla cilíndrica.
+      </div>
+      <SectionCard title="Dimensiones">
+        <div className="grid grid-cols-2 gap-4">
+          <InputGroup
+            label="Diámetro Olla"
+            value={kettleDiameter}
+            onChange={(v) => setKettleDiameter(sanitizePositiveNumber(v, 60))}
+            unit="cm"
+          />
+          <InputGroup
+            label="Altura Líquido"
+            value={liquidHeight}
+            onChange={(v) => setLiquidHeight(sanitizePositiveNumber(v, 50))}
+            unit="cm"
+          />
+        </div>
+      </SectionCard>
+      <ResultCard
+        title="Volumen Actual"
+        value={volumeL.toFixed(1)}
+        unit="Litros"
+        colorClass="text-orange-400"
+      />
+    </>
+  );
 };

@@ -1,9 +1,10 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Send, Bot, Loader2, AlertCircle, Trash2, Sparkles } from 'lucide-react';
+import { Send, Bot, Loader2, AlertCircle, Trash2, Sparkles, Calculator as CalcIcon, ExternalLink } from 'lucide-react';
 import { analyzeBrewingData } from '../services/geminiService';
 import { useBreweryStore } from '../context/store';
 import { buildAppSummary } from '../services/ai/actions';
+import { extractCalculatorLinks, openCalculatorFromAi, CALCULATOR_LABELS, PARAM_LABELS } from '../services/ai/calculatorBridge';
 import { DebouncedInput } from './ui/DebouncedInput';
 import { BatchStatus } from '../types';
 
@@ -294,23 +295,72 @@ export const AiConsultant: React.FC = () => {
 
       <div className="flex-1 bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-700 overflow-hidden flex flex-col">
         <div className="flex-1 overflow-y-auto p-6 space-y-4 bg-zinc-50/50 dark:bg-zinc-950/50">
-          {messages.map((msg, idx) => (
-            <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div className={`max-w-[85%] p-4 rounded-3xl text-sm leading-relaxed ${
-                msg.role === 'user' 
-                  ? 'bg-slate-dark text-white rounded-br-sm shadow-md' 
-                  : 'bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-200 rounded-bl-sm shadow-sm'
-              }`}>
-                {msg.role === 'ai' && (
-                  <div className="flex items-center gap-2 mb-2 pb-2 border-b border-zinc-100 dark:border-zinc-700">
-                    <Sparkles size={14} className="text-copper" />
-                    <span className="text-[10px] font-bold text-copper uppercase tracking-wider">BrewMaster AI</span>
-                  </div>
-                )}
-                {renderMarkdown(msg.content)}
+          {messages.map((msg, idx) => {
+            const { cleanText, links } = msg.role === 'ai' 
+              ? extractCalculatorLinks(msg.content)
+              : { cleanText: msg.content, links: [] };
+
+            return (
+              <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                <div className={`max-w-[85%] p-4 rounded-3xl text-sm leading-relaxed ${
+                  msg.role === 'user' 
+                    ? 'bg-slate-dark text-white rounded-br-sm shadow-md' 
+                    : 'bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-200 rounded-bl-sm shadow-sm'
+                }`}>
+                  {msg.role === 'ai' && (
+                    <div className="flex items-center gap-2 mb-2 pb-2 border-b border-zinc-100 dark:border-zinc-700">
+                      <Sparkles size={14} className="text-copper" />
+                      <span className="text-[10px] font-bold text-copper uppercase tracking-wider">BrewMaster AI</span>
+                    </div>
+                  )}
+                  {renderMarkdown(cleanText)}
+
+                  {links.length > 0 && (
+                    <div className="mt-3 pt-3 border-t border-zinc-100 dark:border-zinc-800 space-y-2">
+                      {links.map((link, lIdx) => {
+                        const label = CALCULATOR_LABELS[link.type] || link.type;
+                        const entries = Object.entries(link.params || {});
+                        return (
+                          <div 
+                            key={lIdx}
+                            className="bg-zinc-50 dark:bg-zinc-800/80 border border-copper/30 rounded-2xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 transition hover:border-copper"
+                          >
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2 text-xs font-bold text-zinc-900 dark:text-white">
+                                <CalcIcon size={14} className="text-copper shrink-0" />
+                                <span>{label}</span>
+                              </div>
+                              {entries.length > 0 && (
+                                <div className="flex flex-wrap gap-1.5 mt-1.5">
+                                  {entries.map(([k, v]) => (
+                                    <span 
+                                      key={k} 
+                                      className="inline-flex items-center text-[10px] bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-md px-1.5 py-0.5 text-zinc-600 dark:text-zinc-300 font-mono"
+                                    >
+                                      <strong className="text-copper mr-1">{PARAM_LABELS[k] || k}:</strong>
+                                      {String(v)}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => openCalculatorFromAi(link.type, link.params)}
+                              className="inline-flex items-center justify-center gap-1.5 text-xs font-semibold bg-copper hover:bg-copper-dark text-white px-3 py-1.5 rounded-xl transition shadow-sm shrink-0 cursor-pointer"
+                            >
+                              <span>Abrir en Calculadora</span>
+                              <ExternalLink size={13} />
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
           {isLoading && (
              <div className="flex justify-start">
                 <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 p-4 rounded-3xl rounded-bl-sm shadow-sm flex items-center gap-3 text-zinc-500 dark:text-zinc-400 text-sm">

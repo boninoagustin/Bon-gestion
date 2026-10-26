@@ -1,5 +1,9 @@
 import { beforeEach, expect, it, vi } from 'vitest';
-vi.mock('../../../context/db', () => ({ dbGet: vi.fn(), dbSet: vi.fn() }));
+vi.mock('../../../context/db', () => ({
+  dbGet: vi.fn(),
+  dbSet: vi.fn(),
+  scheduleTransactionalSave: vi.fn(),
+}));
 import { useBreweryStore as store } from '../../../context/store';
 import { aiActions, buildAppSummary } from '../actions';
 import { executeTool } from '../tools';

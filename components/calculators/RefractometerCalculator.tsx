@@ -1,55 +1,123 @@
-import React, { useState } from 'react';
-import { SectionCard, InputGroup, ResultCard, WATER_PROFILES } from './Shared';
-import { Info, Flame, Trash2, PlusCircle, Check } from 'lucide-react';
-import { DebouncedInput } from '../ui/DebouncedInput';
+import React, { useState, useMemo } from 'react';
+import { SectionCard, InputGroup, ResultCard } from './Shared';
+import { Info } from 'lucide-react';
+import {
+  correctRefractometerReading,
+  RefractometerModel,
+  sanitizeNumber,
+  sanitizePositiveNumber,
+} from '../../lib/brewmath';
+import { useCalculatorPrefill, prefillNum } from '../../services/ai/calculatorBridge';
 
-export const RefractometerCalculator = () => {
-  const [refracOGBrix, setRefracOGBrix] = useState<number>(12);
-const [refracFGBrix, setRefracFGBrix] = useState<number>(6);
-const [refracWCF, setRefracWCF] = useState<number>(1.04);
+export const RefractometerCalculator: React.FC = () => {
+  const prefill = useCalculatorPrefill('REFRACTOMETER');
+  const [refracOGBrix, setRefracOGBrix] = useState<number>(() => prefillNum(prefill, 'originalBrix', 12));
+  const [refracFGBrix, setRefracFGBrix] = useState<number>(() => prefillNum(prefill, 'currentBrix', 6));
+  const [refracWCF, setRefracWCF] = useState<number>(() => prefillNum(prefill, 'wortCorrectionFactor', 1.04));
+  const [model, setModel] = useState<RefractometerModel>('AUTO');
 
-  const calculateRefractometer = () => {
-    const ogBrix = refracOGBrix / refracWCF;
-    const fgBrix = refracFGBrix / refracWCF;
-    // Convert OG Brix to SG
-    const ogSG = 1 + (ogBrix / (258.6 - ((ogBrix * 227.1) / 258.2)));
-    // Sean Terrill correlation for FG with alcohol present
-    const fgSG = 1.0000 - 0.0044993 * ogBrix + 0.011774 * fgBrix + 0.00027581 * Math.pow(ogBrix,2) - 0.0012717 * Math.pow(fgBrix,2) - 0.0000072800 * Math.pow(ogBrix,3) + 0.000063293 * Math.pow(fgBrix,3);
-    const abv = ((ogSG - fgSG) * 131.25);
-    const attenuation = ogSG > 1 ? ((ogSG - fgSG) / (ogSG - 1)) * 100 : 0;
-    return {
-      ogSG: ogSG.toFixed(3),
-      fgSG: fgSG.toFixed(3),
-      abv: abv.toFixed(1),
-      attenuation: attenuation.toFixed(0)
-    };
-  };
+  React.useEffect(() => {
+    if (typeof prefill.originalBrix === 'number') setRefracOGBrix(prefill.originalBrix);
+    if (typeof prefill.currentBrix === 'number') setRefracFGBrix(prefill.currentBrix);
+    if (typeof prefill.wortCorrectionFactor === 'number') setRefracWCF(prefill.wortCorrectionFactor);
+  }, [prefill]);
 
-  const refrac = calculateRefractometer();
+  const refrac = useMemo(
+    () =>
+      correctRefractometerReading(refracOGBrix, refracFGBrix, refracWCF, model),
+    [refracOGBrix, refracFGBrix, refracWCF, model]
+  );
+
   return (
-          <>
-            <div className="mb-5 bg-violet-50 dark:bg-violet-900/20 text-violet-900 dark:text-violet-300 p-4 shadow-sm rounded-xl text-xs border border-violet-100 dark:border-violet-800 flex items-start gap-2">
-                <Info size={16} className="shrink-0 mt-0.5" />
-                <div>Corrige la lectura del refractómetro cuando hay <strong>alcohol presente</strong> (post-fermentación). Sin corrección, el refractómetro sobreestima la densidad final.</div>
-            </div>
-            <SectionCard title="Lecturas Brix">
-                <div className="grid grid-cols-2 gap-4">
-                    <InputGroup label="Brix Inicial (OG)" value={refracOGBrix} onChange={setRefracOGBrix} unit="°Bx" step="0.1" />
-                    <InputGroup label="Brix Final (FG)" value={refracFGBrix} onChange={setRefracFGBrix} unit="°Bx" step="0.1" />
-                </div>
-                <div className="mt-2">
-                    <InputGroup label="Factor Corrección (WCF)" value={refracWCF} onChange={setRefracWCF} step="0.01" />
-                    <p className="text-[10px] text-zinc-400 dark:text-zinc-500 -mt-2">Normalmente 1.04. Calibra con solución conocida si difiere.</p>
-                </div>
-            </SectionCard>
-            <div className="grid grid-cols-2 gap-4 mb-4">
-                <ResultCard title="OG Corregida" value={refrac.ogSG} colorClass="text-amber-400" />
-                <ResultCard title="FG Corregida" value={refrac.fgSG} colorClass="text-violet-400" />
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-                <ResultCard title="ABV" value={refrac.abv} unit="%" colorClass="text-green-400" />
-                <ResultCard title="Atenuación" value={refrac.attenuation} unit="%" colorClass="text-sky-400" />
-            </div>
-          </>
-        );
+    <>
+      <div className="mb-5 bg-violet-50 dark:bg-violet-900/20 text-violet-900 dark:text-violet-300 p-4 shadow-sm rounded-xl text-xs border border-violet-100 dark:border-violet-800 flex items-start gap-2">
+        <Info size={16} className="shrink-0 mt-0.5" />
+        <div>
+          Corrige automáticamente la lectura del refractómetro en presencia de{' '}
+          <strong>alcohol</strong> usando las ecuaciones de{' '}
+          <strong>Sean Terrill</strong> (cúbica, óptima al final de la fermentación) y{' '}
+          <strong>Petr Novotny</strong> (cuadrática, óptima en fermentación activa).
+        </div>
+      </div>
+
+      <SectionCard title="Lecturas Brix y Calibración">
+        <div className="grid grid-cols-2 gap-4">
+          <InputGroup
+            label="Brix Inicial (OG)"
+            value={refracOGBrix}
+            onChange={(v) => setRefracOGBrix(sanitizePositiveNumber(v, 12, 60))}
+            unit="°Bx"
+            step="0.1"
+          />
+          <InputGroup
+            label="Brix Final Aparente (FG)"
+            value={refracFGBrix}
+            onChange={(v) => setRefracFGBrix(sanitizePositiveNumber(v, 6, 60))}
+            unit="°Bx"
+            step="0.1"
+          />
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-2">
+          <div>
+            <InputGroup
+              label="Factor Corrección Mosto (WCF)"
+              value={refracWCF}
+              onChange={(v) =>
+                setRefracWCF(sanitizeNumber(v, { fallback: 1.04, min: 0.9, max: 1.2 }))
+              }
+              step="0.01"
+            />
+            <p className="text-[10px] text-zinc-400 dark:text-zinc-500 -mt-2">
+              Normalmente 1.04. Ajusta según el perfil de tu mosto.
+            </p>
+          </div>
+          <div>
+            <label className="block text-[10px] font-bold text-slate-500 dark:text-zinc-400 mb-1.5 uppercase tracking-wider">
+              Algoritmo de Corrección
+            </label>
+            <select
+              value={model}
+              onChange={(e) => setModel(e.target.value as RefractometerModel)}
+              className="w-full p-2.5 bg-slate-50 dark:bg-zinc-900/60 border border-slate-200 dark:border-zinc-700/80 rounded-xl text-slate-900 dark:text-zinc-100 font-bold text-sm focus:ring-2 focus:ring-copper/50 outline-none"
+            >
+              <option value="AUTO">Automático (Terrill / Novotny)</option>
+              <option value="TERRILL">Sean Terrill (Cúbica)</option>
+              <option value="NOVOTNY">Petr Novotny (Cuadrática)</option>
+            </select>
+          </div>
+        </div>
+      </SectionCard>
+
+      <div className="grid grid-cols-2 gap-4 mb-4">
+        <ResultCard
+          title="OG Corregida"
+          value={refrac.ogSG.toFixed(3)}
+          subtext={`${refrac.ogPlato.toFixed(1)} °P`}
+          colorClass="text-amber-400"
+        />
+        <ResultCard
+          title={`FG Corregida (${refrac.activeModel})`}
+          value={refrac.fgSG.toFixed(3)}
+          subtext={`Terrill: ${refrac.fgSGTerrill.toFixed(3)} | Novotny: ${refrac.fgSGNovotny.toFixed(3)}`}
+          colorClass="text-violet-400"
+        />
+      </div>
+      <div className="grid grid-cols-2 gap-4">
+        <ResultCard
+          title="ABV Estimado"
+          value={refrac.abvHall.toFixed(1)}
+          unit="%"
+          subtext={`Lineal: ${refrac.abvStandard.toFixed(1)}%`}
+          colorClass="text-green-400"
+        />
+        <ResultCard
+          title="Atenuación Aparente"
+          value={refrac.apparentAttenuation.toFixed(0)}
+          unit="%"
+          subtext={`Atenuación Real: ${refrac.realAttenuation.toFixed(0)}% (RE: ${refrac.realExtractPlato.toFixed(1)} °P)`}
+          colorClass="text-sky-400"
+        />
+      </div>
+    </>
+  );
 };

@@ -1,106 +1,787 @@
-import { GoogleGenAI } from "@google/genai";
-import { BrewerySettings } from "../types";
-import { getSystemRules, buildContextPrompt } from "./ai/prompts";
-import { aiTools, executeTool, WRITE_TOOLS } from "./ai/tools";
+/**
+ * @fileoverview geminiService.ts — Orquestador Resiliente de Agente IA (Gemini + OpenAI IPC + Motor Local Offline)
+ * para Bon-Gestión.
+ *
+ * Capacidades de resiliencia e ingeniería implementadas:
+ * 1. Detección temprana de desconexión (`navigator.onLine === false`) y errores de red (`fetch`, `DNS`, `timeout`).
+ * 2. Manejo inteligente de cuotas (`429 RESOURCE_EXHAUSTED`) con:
+ *    - *Exponential Backoff + Jitter* para errores transitorios.
+ *    - *Model Cascade Fallback* (`gemini-2.5-flash` → `gemini-2.0-flash`) cuando se agota el RPM de un modelo.
+ *    - *Circuit Breaker* temporal con respuesta determinista local para no dejar al cervecero sin datos operativos.
+ * 3. Inyección automática de diagnóstico de desvíos de fermentación (`diagnoseFermentationDeviations`)
+ *    en el contexto de cada consulta.
+ * 4. Motor determinista local (`buildOfflineOrFallbackResponse`) que resuelve consultas de agenda,
+ *    diagnóstico de fermentación (atenuación, diacetilo, autólisis, temperatura), inventario, tanques,
+ *    barriles y finanzas aun sin conexión a internet o sin API Key configurada.
+ */
+
+import { GoogleGenAI } from '@google/genai';
+import { BrewerySettings } from '../types';
+import { useBreweryStore } from '../context/store';
+import {
+  buildContextPrompt,
+  diagnoseFermentationDeviations,
+  FermentationDiagnosticAlert,
+  getSystemRules,
+} from './ai/prompts';
+import { aiTools, executeTool, WRITE_TOOLS } from './ai/tools';
+import { tryOfflineCalculation } from './ai/calcTools';
+import { CalculatorDeepLink, serializeCalculatorTag } from './ai/calculatorBridge';
+
+// ============================================================================
+// 1. TIPOS ESTRICTOS DE MENSAJERÍA, PROVEEDORES Y CUOTAS
+// ============================================================================
 
 export interface AnalyzeOptions {
   isVoiceMode?: boolean;
 }
 
+export interface ChatHistoryMessage {
+  role: 'user' | 'ai';
+  content: string;
+}
+
+interface NormalizedChatMessage {
+  role: 'user' | 'assistant' | 'system' | 'tool';
+  content: string;
+  toolCalls?: OpenAIToolCall[];
+}
+
+interface OpenAIToolCall {
+  id?: string;
+  name: string;
+  args: Record<string, unknown>;
+}
+
+interface OpenAIIpcResponse {
+  text?: string;
+  error?: string;
+  toolCalls?: OpenAIToolCall[];
+}
+
+interface ElectronApiWindow {
+  electronAPI?: {
+    askOpenAI?: (
+      messages: NormalizedChatMessage[],
+      settings: BrewerySettings | undefined,
+      tools: unknown
+    ) => Promise<OpenAIIpcResponse>;
+  };
+}
+
+interface GeminiFunctionCall {
+  name: string;
+  args: Record<string, unknown>;
+}
+
+interface GeminiContentPart {
+  text?: string;
+  functionCall?: GeminiFunctionCall;
+  functionResponse?: {
+    name: string;
+    response: Record<string, unknown>;
+  };
+}
+
+interface GeminiContentTurn {
+  role: 'user' | 'model';
+  parts: GeminiContentPart[];
+}
+
+interface GeminiResponseShape {
+  text?: string;
+  functionCalls?: GeminiFunctionCall[];
+}
+
+interface QuotaBreakerState {
+  blockedUntilMs: number;
+  consecutiveRateLimits: number;
+  lastErrorReason: string | null;
+}
+
+// ============================================================================
+// 2. GESTIÓN DE CUOTAS (CIRCUIT BREAKER + EXPONENTIAL BACKOFF + MODEL CASCADE)
+// ============================================================================
+
+const GEMINI_MODEL_CASCADE = ['gemini-2.5-flash', 'gemini-2.0-flash'] as const;
+const REQUEST_TIMEOUT_MS = 22000;
+const MAX_TOOL_ITERATIONS = 5;
+
+const quotaBreaker: QuotaBreakerState = {
+  blockedUntilMs: 0,
+  consecutiveRateLimits: 0,
+  lastErrorReason: null,
+};
+
+/**
+ * Verifica si el navegador o entorno Electron se encuentra sin conexión a internet.
+ */
+export function isClientOffline(): boolean {
+  if (typeof navigator !== 'undefined' && typeof navigator.onLine === 'boolean') {
+    return !navigator.onLine;
+  }
+  return false;
+}
+
+/**
+ * Clasifica errores de red, autenticación y cuota de LLM.
+ */
+function classifyLlmError(error: unknown): {
+  type: 'AUTH' | 'QUOTA' | 'TIMEOUT' | 'NETWORK' | 'SERVER' | 'UNKNOWN';
+  retryable: boolean;
+  retryDelayMs: number;
+  message: string;
+} {
+  const raw = error instanceof Error ? error.message : String(error);
+  const lower = raw.toLowerCase();
+
+  if (
+    lower.includes('api_key') ||
+    lower.includes('api key') ||
+    lower.includes('401') ||
+    lower.includes('403') ||
+    lower.includes('permission_denied') ||
+    lower.includes('unauthenticated')
+  ) {
+    return {
+      type: 'AUTH',
+      retryable: false,
+      retryDelayMs: 0,
+      message: raw,
+    };
+  }
+
+  if (
+    lower.includes('429') ||
+    lower.includes('quota') ||
+    lower.includes('resource_exhausted') ||
+    lower.includes('rate limit') ||
+    lower.includes('too many requests')
+  ) {
+    // Extraer segundos sugeridos si vienen en el mensaje (ej. "retry in 18s")
+    const retryMatch = raw.match(/retry\s+in\s+(\d+(?:\.\d+)?)\s*s/i);
+    const parsedDelayMs = retryMatch
+      ? Math.min(30000, Math.ceil(Number(retryMatch[1]) * 1000))
+      : 2000;
+    return {
+      type: 'QUOTA',
+      retryable: true,
+      retryDelayMs: parsedDelayMs,
+      message: raw,
+    };
+  }
+
+  if (lower.includes('timeout') || lower.includes('aborted')) {
+    return {
+      type: 'TIMEOUT',
+      retryable: true,
+      retryDelayMs: 1200,
+      message: raw,
+    };
+  }
+
+  if (
+    lower.includes('failed to fetch') ||
+    lower.includes('network') ||
+    lower.includes('enotfound') ||
+    lower.includes('econnrefused') ||
+    lower.includes('err_internet_disconnected') ||
+    lower.includes('offline')
+  ) {
+    return {
+      type: 'NETWORK',
+      retryable: false,
+      retryDelayMs: 0,
+      message: raw,
+    };
+  }
+
+  if (
+    lower.includes('500') ||
+    lower.includes('502') ||
+    lower.includes('503') ||
+    lower.includes('504') ||
+    lower.includes('overloaded')
+  ) {
+    return {
+      type: 'SERVER',
+      retryable: true,
+      retryDelayMs: 1500,
+      message: raw,
+    };
+  }
+
+  return {
+    type: 'UNKNOWN',
+    retryable: false,
+    retryDelayMs: 0,
+    message: raw,
+  };
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Resuelve la API Key configurada por el usuario o expuesta de forma segura por Vite (`VITE_GEMINI_API_KEY`).
+ */
+function resolveGeminiApiKey(settings?: BrewerySettings): string {
+  if (settings?.apiKey && settings.apiKey.trim().length > 0) {
+    return settings.apiKey.trim();
+  }
+  try {
+    const viteEnv = (import.meta as unknown as { env?: Record<string, string> })
+      ?.env;
+    if (viteEnv?.VITE_GEMINI_API_KEY) {
+      return viteEnv.VITE_GEMINI_API_KEY.trim();
+    }
+  } catch {
+    // Entorno sin import.meta
+  }
+  if (typeof process !== 'undefined' && process.env?.VITE_GEMINI_API_KEY) {
+    return process.env.VITE_GEMINI_API_KEY.trim();
+  }
+  return '';
+}
+
+// ============================================================================
+// 3. FORMATEADOR DE DIAGNÓSTICO DE FERMENTACIÓN EN TIEMPO REAL
+// ============================================================================
+
+function buildLiveDiagnosticContext(): {
+  alerts: FermentationDiagnosticAlert[];
+  summaryText: string;
+} {
+  const state = useBreweryStore.getState();
+  const alerts = diagnoseFermentationDeviations(state.batches, state.fermenters);
+
+  if (alerts.length === 0) {
+    return {
+      alerts: [],
+      summaryText:
+        'Sin desvíos críticos de fermentación detectados en los lotes activos.',
+    };
+  }
+
+  const lines = alerts.map(
+    (a) =>
+      `- [${a.severity}] Lote ${a.lotCode} (${a.recipeName}${a.fermenterName ? ` en ${a.fermenterName}` : ''}): ${a.title}. Hallazgo: ${a.technicalFinding} Acción sugerida: ${a.recommendedAction}`
+  );
+
+  return {
+    alerts,
+    summaryText: lines.join('\n'),
+  };
+}
+
+// ============================================================================
+// 4. MOTOR DE FALLBACK OFFLINE Y DEGRADACIÓN GRACEFUL ANTE CORTE DE RED O CUOTA
+// ============================================================================
+
+/**
+ * Genera una respuesta operativa completa y precisa usando exclusivamente la base de datos local
+ * cuando el usuario no tiene conexión a internet, se alcanzó el límite de cuota de la API
+ * o aún no configuró su API Key.
+ */
+export function buildOfflineOrFallbackResponse(
+  userQuery: string,
+  reason: 'OFFLINE' | 'QUOTA' | 'NO_API_KEY',
+  isVoiceMode: boolean = false
+): string {
+  // 0. Parser determinista de cálculos con las funciones de brewmath.ts
+  const calcResult = tryOfflineCalculation(userQuery, isVoiceMode);
+  if (calcResult) {
+    return calcResult;
+  }
+
+  const q = userQuery.toLowerCase();
+  const state = useBreweryStore.getState();
+  const { alerts } = buildLiveDiagnosticContext();
+
+  const statusBadge =
+    reason === 'OFFLINE'
+      ? '📡 *(Modo Sin Conexión activo: respuesta generada con el motor local de ingeniería sobre tus datos en IndexedDB)*'
+      : reason === 'QUOTA'
+      ? '⏳ *(Límite temporal de cuota en la nube alcanzado: respuesta inmediata generada por el motor local de BON)*'
+      : '💡 *(Modo Local Activo: cargá tu API Key en Configuración ⚙️ para habilitar conversación libre con LLM)*';
+
+  // Modo Voz: respuesta directa y hablada sin markdown
+  if (isVoiceMode) {
+    const briefing = executeTool('get_daily_briefing', {});
+    const occupiedCount = Array.isArray(briefing.occupiedFermenters)
+      ? briefing.occupiedFermenters.length
+      : 0;
+    const dirtyCount = Array.isArray(briefing.dirtyFermenters)
+      ? briefing.dirtyFermenters.length
+      : 0;
+    const alertText =
+      alerts.length > 0
+        ? ` Atención: detecté ${alerts.length} desvío de fermentación en ${alerts[0].recipeName}.`
+        : '';
+    return `Estoy operando en modo local. Tenés ${occupiedCount} fermentadores ocupados y ${dirtyCount} tanques sucios para limpieza.${alertText}`;
+  }
+
+  // 1. Consultas de diagnóstico de fermentación, calidad, atenuación, diacetilo o autólisis
+  if (
+    q.includes('fermentacion') ||
+    q.includes('fermentación') ||
+    q.includes('atenuacion') ||
+    q.includes('atenuación') ||
+    q.includes('diacetilo') ||
+    q.includes('autolisis') ||
+    q.includes('autólisis') ||
+    q.includes('desvio') ||
+    q.includes('desvío') ||
+    q.includes('calidad') ||
+    q.includes('off-flavor')
+  ) {
+    const out: string[] = [
+      '### 🧪 Diagnóstico de Ingeniería de Fermentación (Motor Local)\n',
+    ];
+    if (alerts.length === 0) {
+      out.push(
+        '✅ **Todos los lotes en fermentación y maduración presentan parámetros dentro de rango normal** (sin indicios de estancamiento de atenuación, choque térmico, autólisis ni enfriamiento prematuro por diacetilo).\n'
+      );
+    } else {
+      alerts.forEach((a) => {
+        out.push(
+          `- **[${a.severity}] ${a.recipeName} (${a.lotCode})${a.fermenterName ? ` — ${a.fermenterName}` : ''}:** ${a.title}`
+        );
+        out.push(`  - *Hallazgo técnico:* ${a.technicalFinding}`);
+        out.push(`  - *Causas probables:* ${a.rootCauses.join(' ')}`);
+        out.push(`  - *Acción recomendada:* **${a.recommendedAction}**\n`);
+      });
+    }
+    out.push(statusBadge);
+    return out.join('\n');
+  }
+
+  // 2. Consultas de fermentadores / tanques
+  if (q.includes('fermentador') || q.includes('tanque')) {
+    const fermRes = executeTool('get_fermenters_status', {});
+    const out: string[] = ['### 🛢️ Estado de Fermentadores en Planta\n'];
+    const list = Array.isArray(fermRes.fermenters) ? fermRes.fermenters : [];
+    if (list.length > 0) {
+      list.forEach((f: Record<string, unknown>) => {
+        const cb = f.currentBatch as Record<string, unknown> | null;
+        const batchInfo = cb
+          ? ` → **Ocupado** con ${String(cb.recipeName)} (${String(cb.lotCode)}) — Día ${String(cb.daysInTank ?? '?')}, OG ${String(cb.originalGravity ?? '?')}${cb.lastGravity ? `, SG actual ${String(cb.lastGravity)}` : ''}${cb.lastTemperature !== undefined ? `, ${String(cb.lastTemperature)}°C` : ''}`
+          : ` → Estado: **${String(f.status)}**`;
+        out.push(`- **${String(f.name)}** (${String(f.capacity)}L)${batchInfo}`);
+      });
+      out.push(
+        `\n**Capacidad instalada:** ${String(fermRes.available)} disponibles | ${String(fermRes.occupied)} ocupados | ${String(fermRes.dirty)} sucios para CIP | ${String(fermRes.maintenance)} en mantenimiento.`
+      );
+    } else {
+      out.push('No hay fermentadores registrados en el sistema.');
+    }
+    out.push(`\n${statusBadge}`);
+    return out.join('\n');
+  }
+
+  // 3. Consultas de stock / inventario / insumos / malta / lúpulo
+  if (
+    q.includes('stock') ||
+    q.includes('inventario') ||
+    q.includes('insumo') ||
+    q.includes('malta') ||
+    q.includes('lupulo') ||
+    q.includes('lúpulo') ||
+    q.includes('cocinar')
+  ) {
+    const invRes = executeTool('query_inventory', {});
+    const items = Array.isArray(invRes.items)
+      ? (invRes.items as Record<string, unknown>[])
+      : [];
+    const out: string[] = ['### 📦 Auditoría de Inventario e Insumos\n'];
+    const outOfStock = items.filter((i) => i.status === 'OUT_OF_STOCK');
+    const lowStock = items.filter((i) => i.status === 'LOW_STOCK');
+
+    if (outOfStock.length > 0) {
+      out.push(
+        `- ❌ **Agotados (${outOfStock.length}):** ${outOfStock.map((i) => String(i.name)).join(', ')}`
+      );
+    }
+    if (lowStock.length > 0) {
+      out.push(
+        `- ⚠️ **Stock crítico (${lowStock.length}):** ${lowStock.map((i) => `${String(i.name)} (${String(i.stockAmount)} ${String(i.unit)})`).join(', ')}`
+      );
+    }
+    out.push(
+      `- 💰 **Valorización total en depósito:** $${Number(invRes.totalInventoryValuation ?? 0).toLocaleString('es-AR')} (${items.length} ítems activos)`
+    );
+    out.push(`\n${statusBadge}`);
+    return out.join('\n');
+  }
+
+  // 4. Consultas de finanzas / ventas / gastos / deudas
+  if (
+    q.includes('finanza') ||
+    q.includes('venta') ||
+    q.includes('gasto') ||
+    q.includes('deuda') ||
+    q.includes('margen') ||
+    q.includes('cliente')
+  ) {
+    const fin = executeTool('get_financial_report', {});
+    const out: string[] = [
+      `### 💰 Resumen Financiero (${String(fin.month)})\n`,
+      `- **Ingresos por ventas:** $${Number(fin.income ?? 0).toLocaleString('es-AR')}`,
+      `- **Gastos operativos registrados:** $${Number(fin.expensesRegistered ?? 0).toLocaleString('es-AR')}`,
+      `- **Resultado operativo antes de costos fijos:** $${Number(fin.resultBeforeFixed ?? 0).toLocaleString('es-AR')}`,
+      `- **Costos fijos mensuales configurados:** $${Number(fin.fixedCostsConfiguredMonthly ?? 0).toLocaleString('es-AR')}`,
+    ];
+    const debtors = state.customers
+      .filter((c) => c.debt > 0)
+      .sort((a, b) => b.debt - a.debt)
+      .slice(0, 5);
+    if (debtors.length > 0) {
+      out.push(
+        `\n**Principales cuentas por cobrar:**\n${debtors.map((c) => `- **${c.name}:** $${c.debt.toLocaleString('es-AR')}${c.contact ? ` (${c.contact})` : ''}`).join('\n')}`
+      );
+    }
+    out.push(`\n${statusBadge}`);
+    return out.join('\n');
+  }
+
+  // 5. Consultas de lotes activos
+  if (q.includes('lote') || q.includes('produccion') || q.includes('producción')) {
+    const batchesRes = executeTool('get_active_batches', {});
+    const active = Array.isArray(batchesRes.activeBatches)
+      ? (batchesRes.activeBatches as Record<string, unknown>[])
+      : [];
+    const out: string[] = ['### 🍺 Lotes Activos en Producción\n'];
+    if (active.length > 0) {
+      active.forEach((b) => {
+        const ferm = b.fermenterName ? ` en **${String(b.fermenterName)}**` : '';
+        const days =
+          b.daysSinceBrew !== undefined ? ` (Día ${String(b.daysSinceBrew)})` : '';
+        const grav = b.lastGravityReading
+          ? ` | SG actual: ${String(b.lastGravityReading)}`
+          : b.originalGravity
+          ? ` | OG: ${String(b.originalGravity)}`
+          : '';
+        const temp =
+          b.lastTemperatureReading !== undefined
+            ? ` | Temp: ${String(b.lastTemperatureReading)}°C`
+            : '';
+        out.push(
+          `- **${String(b.recipeName)}** [${String(b.lotCode)}] — **${String(b.status)}**${ferm}${days}${grav}${temp}`
+        );
+      });
+    } else {
+      out.push('No hay lotes activos en este momento.');
+    }
+    out.push(`\n${statusBadge}`);
+    return out.join('\n');
+  }
+
+  // 6. Default: Briefing Operativo Completo del Día + Alertas de Fermentación
+  const b = executeTool('get_daily_briefing', {});
+  const out: string[] = ['### 📋 Resumen Operativo y de Ingeniería de Planta\n'];
+
+  const eventsToday = Array.isArray(b.eventsToday)
+    ? (b.eventsToday as Record<string, unknown>[])
+    : [];
+  if (eventsToday.length > 0) {
+    out.push(
+      `**📅 Agenda de Hoy:**\n${eventsToday.map((e) => `- ${String(e.title)}`).join('\n')}\n`
+    );
+  } else {
+    out.push('**📅 Agenda de Hoy:** Sin eventos programados para hoy.\n');
+  }
+
+  if (alerts.length > 0) {
+    out.push('**🧪 Alertas de Diagnóstico de Fermentación:**');
+    alerts.forEach((a) => {
+      out.push(
+        `- **[${a.severity}] ${a.recipeName} (${a.lotCode}):** ${a.title} → *${a.recommendedAction}*`
+      );
+    });
+    out.push('');
+  }
+
+  const dirtyF = Array.isArray(b.dirtyFermenters)
+    ? (b.dirtyFermenters as Record<string, unknown>[])
+    : [];
+  const dirtyK = Array.isArray(b.dirtyKegs) ? (b.dirtyKegs as string[]) : [];
+  if (dirtyF.length > 0 || dirtyK.length > 0) {
+    out.push('**🧼 Limpieza y Sanitización (CIP):**');
+    if (dirtyF.length > 0) {
+      out.push(
+        `- **Fermentadores para CIP:** ${dirtyF.map((f) => String(f.name)).join(', ')}`
+      );
+    }
+    if (dirtyK.length > 0) {
+      out.push(
+        `- **Barriles sucios (${dirtyK.length}):** ${dirtyK.join(', ')}`
+      );
+    }
+    out.push('');
+  }
+
+  const topDebtors = Array.isArray(b.topDebtors)
+    ? (b.topDebtors as Record<string, unknown>[])
+    : [];
+  if (topDebtors.length > 0) {
+    out.push('**💸 Cobranzas Prioritarias:**');
+    topDebtors.forEach((c) => {
+      out.push(
+        `- **${String(c.name)}:** $${Number(c.debt ?? 0).toLocaleString('es-AR')}${c.contact ? ` (Tel: ${String(c.contact)})` : ''}`
+      );
+    });
+    out.push('');
+  }
+
+  const outOfStock = Array.isArray(b.outOfStock)
+    ? (b.outOfStock as string[])
+    : [];
+  const lowStock = Array.isArray(b.lowStock)
+    ? (b.lowStock as Record<string, unknown>[])
+    : [];
+  if (outOfStock.length > 0 || lowStock.length > 0) {
+    out.push('**📦 Alertas de Stock:**');
+    if (outOfStock.length > 0) {
+      out.push(`- **Sin stock:** ${outOfStock.join(', ')}`);
+    }
+    if (lowStock.length > 0) {
+      out.push(
+        `- **Stock bajo:** ${lowStock.map((i) => `${String(i.name)} (${String(i.stock)} ${String(i.unit)})`).join(', ')}`
+      );
+    }
+    out.push('');
+  }
+
+  out.push(statusBadge);
+  return out.join('\n');
+}
+
+// ============================================================================
+// 5. INVOCACIÓN RESILIENTE A GEMINI CON RETRIES Y FALLBACK DE MODELO
+// ============================================================================
+
+async function callGeminiWithResilience(
+  ai: GoogleGenAI,
+  contents: GeminiContentTurn[],
+  systemInstruction: string
+): Promise<GeminiResponseShape> {
+  let lastError: unknown;
+
+  for (const modelName of GEMINI_MODEL_CASCADE) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error('timeout')), REQUEST_TIMEOUT_MS);
+        });
+
+        const response = (await Promise.race([
+          ai.models.generateContent({
+            model: modelName,
+            contents: contents as unknown as Parameters<
+              typeof ai.models.generateContent
+            >[0]['contents'],
+            config: {
+              systemInstruction,
+              tools: aiTools as unknown as NonNullable<
+                Parameters<typeof ai.models.generateContent>[0]['config']
+              >['tools'],
+            },
+          }),
+          timeoutPromise,
+        ])) as GeminiResponseShape;
+
+        // Éxito: resetear contador de rate limits
+        quotaBreaker.consecutiveRateLimits = 0;
+        quotaBreaker.blockedUntilMs = 0;
+        quotaBreaker.lastErrorReason = null;
+
+        return response;
+      } catch (err) {
+        lastError = err;
+        const classified = classifyLlmError(err);
+
+        // Si es error de autenticación o red caída, no reintentar
+        if (classified.type === 'AUTH' || classified.type === 'NETWORK') {
+          throw err;
+        }
+
+        // Si es cuota agotada (429), aplicamos backoff corto en intento 0 y pasamos al modelo secundario en intento 1
+        if (classified.type === 'QUOTA') {
+          quotaBreaker.consecutiveRateLimits += 1;
+          quotaBreaker.lastErrorReason = classified.message;
+          if (attempt === 0) {
+            const jitter = Math.floor(Math.random() * 400);
+            await sleepMs(Math.min(2500, classified.retryDelayMs + jitter));
+            continue;
+          }
+          // Cambiar al siguiente modelo en GEMINI_MODEL_CASCADE
+          break;
+        }
+
+        if (classified.retryable && attempt === 0) {
+          const backoff = 1000 * Math.pow(2, attempt) + Math.floor(Math.random() * 300);
+          await sleepMs(backoff);
+          continue;
+        }
+
+        break;
+      }
+    }
+  }
+
+  throw lastError ?? new Error('No se pudo obtener respuesta del modelo.');
+}
+
+// ============================================================================
+// 6. FUNCIÓN PRINCIPAL analyzeBrewingData
+// ============================================================================
+
 export const analyzeBrewingData = async (
-  messagesHistory: { role: 'user' | 'ai'; content: string }[],
+  messagesHistory: ChatHistoryMessage[],
   appData: string,
   settings?: BrewerySettings,
   options: AnalyzeOptions = {}
 ): Promise<string> => {
+  const isVoice = Boolean(options.isVoiceMode);
+  const lastUserMessage =
+    messagesHistory[messagesHistory.length - 1]?.content || '';
+
+  // 1. Fallback inmediato si el dispositivo no tiene conexión a internet
+  if (isClientOffline()) {
+    return buildOfflineOrFallbackResponse(lastUserMessage, 'OFFLINE', isVoice);
+  }
+
+  // 2. Verificar si el circuit breaker de cuota está activo
+  if (Date.now() < quotaBreaker.blockedUntilMs) {
+    return buildOfflineOrFallbackResponse(lastUserMessage, 'QUOTA', isVoice);
+  }
+
   try {
-    const isVoice = !!options.isVoiceMode;
-    const SYSTEM_RULES = getSystemRules(
+    const systemRules = getSystemRules(
       settings?.aiPersonality || '',
       settings?.aiLongTermMemory || '',
       isVoice
     );
 
-    // Convertir historial a formato unificado
-    const contents = messagesHistory.map((msg, index) => {
-      let textToSend = msg.content || '';
+    const { summaryText: diagnosticSummary } = buildLiveDiagnosticContext();
 
-      // Inyectar datos en el último mensaje de usuario
-      if (index === messagesHistory.length - 1 && msg.role === 'user') {
-        const dateTimeStr = new Date().toLocaleString('es-AR', {
-          weekday: 'long',
-          year: 'numeric',
-          month: 'long',
-          day: 'numeric',
-          hour: '2-digit',
-          minute: '2-digit'
-        });
-        textToSend = buildContextPrompt(appData, msg.content, dateTimeStr);
+    // Preparar historial normalizado inyectando el estado de planta + diagnóstico de fermentación en el último turno
+    const contents: NormalizedChatMessage[] = messagesHistory.map(
+      (msg, index) => {
+        let textToSend = msg.content || '';
+
+        if (index === messagesHistory.length - 1 && msg.role === 'user') {
+          const dateTimeStr = new Date().toLocaleString('es-AR', {
+            weekday: 'long',
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+          });
+          textToSend = buildContextPrompt(
+            appData,
+            msg.content,
+            dateTimeStr,
+            diagnosticSummary
+          );
+        }
+
+        return {
+          role: msg.role === 'ai' ? 'assistant' : 'user',
+          content: String(textToSend),
+        };
       }
-
-      return {
-        role: msg.role === 'ai' ? 'assistant' : 'user',
-        content: String(textToSend)
-      };
-    });
+    );
 
     const filteredContents = contents.filter(
-      c => !(c.role === 'assistant' && c.content && (c.content.includes('Soy BrewMaster AI') || c.content.includes('Conversación reseteada')))
+      (c) =>
+        !(
+          c.role === 'assistant' &&
+          c.content &&
+          (c.content.includes('Soy BrewMaster AI') ||
+            c.content.includes('Conversación reseteada'))
+        )
     );
 
     const trimmedContents = filteredContents.slice(-20);
 
-    // --- OPCIÓN 1: CHATGPT VÍA ELECTRON IPC --- //
+    // ------------------------------------------------------------------------
+    // OPCIÓN 1: CHATGPT VÍA ELECTRON IPC
+    // ------------------------------------------------------------------------
     if (settings?.aiProvider === 'chatgpt') {
-      if (typeof window !== 'undefined' && (window as any).electronAPI) {
-        let openAiMessages = [
-          { role: 'system', content: SYSTEM_RULES },
-          ...trimmedContents
+      const win =
+        typeof window !== 'undefined'
+          ? (window as unknown as ElectronApiWindow)
+          : undefined;
+      if (win?.electronAPI?.askOpenAI) {
+        const openAiMessages: NormalizedChatMessage[] = [
+          { role: 'system', content: systemRules },
+          ...trimmedContents,
         ];
 
         let loopCount = 0;
         let finalResponseText = '';
         const executedToolsLog: string[] = [];
+        const executedCalculatorLinks: CalculatorDeepLink[] = [];
 
-        // Loop de llamadas a herramientas (soporte multi-paso completo para OpenAI)
-        while (loopCount < 5) {
+        while (loopCount < MAX_TOOL_ITERATIONS) {
           loopCount++;
-          const response = await (window as any).electronAPI.askOpenAI(
+          const response = await win.electronAPI.askOpenAI(
             openAiMessages,
             settings,
             aiTools[0]?.functionDeclarations
           );
 
           if (response?.error) {
-            return `⚠️ Inconveniente con ChatGPT: ${response.error}\n\n💡 Puedes cambiar temporalmente el motor a Google Gemini en Configuración (⚙️).`;
+            const classified = classifyLlmError(new Error(response.error));
+            if (classified.type === 'NETWORK' || classified.type === 'QUOTA') {
+              return buildOfflineOrFallbackResponse(
+                lastUserMessage,
+                classified.type === 'NETWORK' ? 'OFFLINE' : 'QUOTA',
+                isVoice
+              );
+            }
+            return `⚠️ Inconveniente con ChatGPT: ${response.error}\n\n💡 Podés cambiar al motor Google Gemini en Configuración (⚙️).`;
           }
 
           if (response?.toolCalls && response.toolCalls.length > 0) {
-            // Ejecutar todas las herramientas solicitadas por OpenAI
-            const toolResultsForChat: any[] = [];
+            const toolResultsForChat: {
+              toolCallId: string;
+              toolName: string;
+              result: Record<string, unknown>;
+            }[] = [];
+
             for (const call of response.toolCalls) {
               const res = executeTool(call.name, call.args);
               if (WRITE_TOOLS.has(call.name) && res?.success) {
-                executedToolsLog.push(res.message || call.name);
+                executedToolsLog.push(
+                  typeof res.message === 'string' ? res.message : call.name
+                );
+              }
+              if (Array.isArray(res?.calculatorLinks)) {
+                for (const lk of res.calculatorLinks) {
+                  if (lk && typeof lk === 'object') executedCalculatorLinks.push(lk as CalculatorDeepLink);
+                }
               }
               toolResultsForChat.push({
                 toolCallId: call.id || call.name,
                 toolName: call.name,
-                result: res
+                result: res,
               });
             }
 
-            // Alimentar la respuesta de las herramientas de vuelta a OpenAI para que genere su respuesta final informada
             openAiMessages.push({
               role: 'assistant',
               content: response.text || '',
-              toolCalls: response.toolCalls
-            } as any);
+              toolCalls: response.toolCalls,
+            });
 
             openAiMessages.push({
               role: 'tool',
-              content: JSON.stringify(toolResultsForChat)
-            } as any);
+              content: JSON.stringify(toolResultsForChat),
+            });
 
             finalResponseText = response.text || '';
           } else {
@@ -113,203 +794,137 @@ export const analyzeBrewingData = async (
           finalResponseText += `\n\n*(Acciones completadas: ${executedToolsLog.join(', ')})*`;
         }
 
+        if (!isVoice && executedCalculatorLinks.length > 0) {
+          for (const lk of executedCalculatorLinks) {
+            const tag = serializeCalculatorTag(lk);
+            if (!finalResponseText.includes(tag)) {
+              finalResponseText += `\n\n${tag}`;
+            }
+          }
+        }
+
         return finalResponseText;
-      } else {
-        return "No estás ejecutando la aplicación desde la versión de escritorio de BON (Electron). Vuelve a Google Gemini en Configuración (⚙️).";
       }
+
+      return 'No estás ejecutando la versión de escritorio (Electron) para usar el puente IPC de ChatGPT. Cambiá a Google Gemini en Configuración (⚙️).';
     }
 
-    // --- OPCIÓN 2: GOOGLE GEMINI --- //
-    const apiKey = settings?.apiKey || (typeof process !== 'undefined' && process.env?.VITE_GEMINI_API_KEY) || '';
+    // ------------------------------------------------------------------------
+    // OPCIÓN 2: GOOGLE GEMINI CON MULTI-TOOL CALLING Y FALLBACK LOCAL
+    // ------------------------------------------------------------------------
+    const apiKey = resolveGeminiApiKey(settings);
 
     if (!apiKey) {
-      // Fallback local en Modo Demo para consultas operativas clave
-      const lastUserMsg = (messagesHistory[messagesHistory.length - 1]?.content || '').toLowerCase();
-      
-      if (lastUserMsg.includes('hacer hoy') || lastUserMsg.includes('agenda') || lastUserMsg.includes('resumen') || lastUserMsg.includes('plan')) {
-        const b = executeTool('get_daily_briefing', {});
-        const out: string[] = ['### 📋 Plan y Estado del Día (Modo Demo)\n'];
-        
-        // 1. Agenda
-        if (b.eventsToday && b.eventsToday.length > 0) {
-          out.push(`**📅 Agenda de Hoy:**\n${b.eventsToday.map((e: any) => `- ${e.title}`).join('\n')}\n`);
-        } else {
-          out.push(`**📅 Agenda de Hoy:** No tenés eventos agendados para hoy.\n`);
-        }
-        if (b.overdueEvents && b.overdueEvents.length > 0) {
-          out.push(`**⚠️ Tareas Atrasadas:**\n${b.overdueEvents.map((e: any) => `- ${e.title} (${e.date})`).join('\n')}\n`);
-        }
-
-        // 2. Limpieza y CIP
-        const dirtyF = b.dirtyFermenters || [];
-        const dirtyK = b.dirtyKegs || [];
-        if (dirtyF.length > 0 || dirtyK.length > 0) {
-          out.push(`**🧼 Limpieza y Sanitización (CIP):**`);
-          if (dirtyF.length > 0) out.push(`- 🛢️ **Fermentadores sucios para CIP:** ${dirtyF.map((f: any) => f.name).join(', ')}. Conviene lavarlos y sanitizarlos para dejarlos disponibles.`);
-          if (dirtyK.length > 0) out.push(`- 🪣 **Barriles sucios:** ${dirtyK.length} barril(es) para lavar (${dirtyK.join(', ')}).`);
-          out.push('');
-        } else {
-          out.push(`**🧼 Limpieza:** Todos los fermentadores y barriles están limpios y listos.\n`);
-        }
-
-        // 3. Cobranzas
-        if (b.topDebtors && b.topDebtors.length > 0) {
-          out.push(`**💸 Cobranzas pendientes:**`);
-          b.topDebtors.forEach((c: any) => out.push(`- **${c.name}:** debe $${c.debt}${c.contact ? ` (Tel: ${c.contact})` : ''} → Te sugiero llamarlo para coordinar el cobro.`));
-          out.push('');
-        }
-
-        // 4. Stock crítico
-        if ((b.outOfStock && b.outOfStock.length > 0) || (b.lowStock && b.lowStock.length > 0)) {
-          out.push(`**📦 Stock Crítico:**`);
-          if (b.outOfStock && b.outOfStock.length > 0) out.push(`- ❌ **Sin stock:** ${b.outOfStock.join(', ')}`);
-          if (b.lowStock && b.lowStock.length > 0) out.push(`- ⚠️ **Stock bajo:** ${b.lowStock.map((i: any) => `${i.name} (${i.stock} ${i.unit})`).join(', ')}`);
-          out.push('');
-        }
-
-        // 5. Lotes en fermentación
-        if (b.fermenting && b.fermenting.length > 0) {
-          out.push(`**🍺 Lotes en producción:**`);
-          b.fermenting.forEach((l: any) => {
-            const ferm = l.fermenter ? ` en **${l.fermenter}**` : '';
-            const grav = l.lastGravity ? `, densidad actual: ${l.lastGravity}` : '';
-            const temp = l.lastTemp !== undefined ? `, temp: ${l.lastTemp}°C` : '';
-            const days = l.days !== undefined ? `, día ${l.days}` : '';
-            out.push(`- **${l.recipe}** [${l.lotCode}] (${l.status})${ferm}${days}${grav}${temp}`);
-          });
-          out.push('');
-        }
-
-        out.push(`\n*(💡 Modo Demo: resumen generado con tus datos locales. Para hablar libremente por voz o chat conversacional con la IA, ingresá tu API Key en Configuración ⚙️)*`);
-        return out.join('\n');
-      }
-
-      if (lastUserMsg.includes('fermentador') || lastUserMsg.includes('tanque')) {
-        const fermRes = executeTool('get_fermenters_status', {});
-        const out: string[] = ['### 🛢️ Estado de Fermentadores (Modo Demo)\n'];
-        if (fermRes.fermenters && fermRes.fermenters.length > 0) {
-          fermRes.fermenters.forEach((f: any) => {
-            const batchInfo = f.currentBatch ? ` → **Ocupado** con ${f.currentBatch.recipeName} (${f.currentBatch.lotCode}) - Día ${f.currentBatch.daysInTank ?? '?'}, OG ${f.currentBatch.originalGravity ?? '?'}${f.currentBatch.lastGravity ? `, actual ${f.currentBatch.lastGravity}` : ''}` : ` → Estado: **${f.status}**`;
-            out.push(`- **${f.name}** (${f.capacity}L)${batchInfo}`);
-          });
-          out.push(`\n**Resumen:** ${fermRes.available} disponibles | ${fermRes.occupied} ocupados | ${fermRes.dirty} sucios para CIP | ${fermRes.maintenance} en mantenimiento.`);
-        } else {
-          out.push('No tenés fermentadores registrados todavía.');
-        }
-        out.push(`\n*(💡 Modo Demo: para activar el asistente de IA completo con comandos automáticos, cargá tu API Key en Configuración ⚙️)*`);
-        return out.join('\n');
-      }
-
-      if (lastUserMsg.includes('lote') || lastUserMsg.includes('produccion') || lastUserMsg.includes('coccion')) {
-        const batchesRes = executeTool('get_active_batches', {});
-        const active = batchesRes.activeBatches || [];
-        const out: string[] = ['### 🍺 Lotes en Producción (Modo Demo)\n'];
-        if (active.length > 0) {
-          active.forEach((b: any) => {
-            const ferm = b.fermenterName ? ` en **${b.fermenterName}**` : '';
-            const days = b.daysSinceBrew !== undefined ? ` (Día ${b.daysSinceBrew})` : '';
-            const grav = b.lastGravityReading ? ` | Densidad actual: ${b.lastGravityReading}` : (b.originalGravity ? ` | OG: ${b.originalGravity}` : '');
-            const temp = b.lastTemperatureReading !== undefined ? ` | Temp: ${b.lastTemperatureReading}°C` : '';
-            out.push(`- **${b.recipeName}** [${b.lotCode}] - Estado: **${b.status}**${ferm}${days}${grav}${temp}`);
-          });
-        } else {
-          out.push('No hay lotes activos en este momento.');
-        }
-        out.push(`\n*(💡 Modo Demo: para activar el asistente de IA completo con comandos automáticos, cargá tu API Key en Configuración ⚙️)*`);
-        return out.join('\n');
-      }
-
-      return "Para usar el asistente completo con Google Gemini o ChatGPT, ingresa tu API Key en Configuración (ícono ⚙️).\n\nEn Modo Demo podés hacerme consultas directas como:\n- *\"¿Qué tengo para hacer hoy?\"*\n- *\"¿Cuál es el estado de los fermentadores?\"*\n- *\"¿Cómo van los lotes en producción?\"*";
+      return buildOfflineOrFallbackResponse(
+        lastUserMessage,
+        'NO_API_KEY',
+        isVoice
+      );
     }
 
     const ai = new GoogleGenAI({ apiKey });
 
-    const geminiContents = trimmedContents.map(msg => ({
+    const currentContents: GeminiContentTurn[] = trimmedContents.map((msg) => ({
       role: msg.role === 'assistant' ? 'model' : 'user',
-      parts: [{ text: msg.content }]
+      parts: [{ text: msg.content }],
     }));
 
-    let currentContents: any[] = [...geminiContents];
+    let response = await callGeminiWithResilience(
+      ai,
+      currentContents,
+      systemRules
+    );
 
-    const generateWithTimeout = async (options: any) => {
-      const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error('timeout')), 25000);
-      });
-      return Promise.race([
-        ai.models.generateContent(options),
-        timeoutPromise
-      ]) as Promise<any>;
-    };
-
-    let response = await generateWithTimeout({
-      model: 'gemini-2.5-flash',
-      contents: currentContents,
-      config: {
-        systemInstruction: SYSTEM_RULES,
-        tools: aiTools as any,
-      },
-    });
-
-    // Loop multi-tool: iterar hasta que la IA termine o alcance el tope de pasos
     let iterations = 0;
-    while (response.functionCalls && response.functionCalls.length > 0 && iterations < 5) {
+    const executedToolsLog: string[] = [];
+    const executedCalculatorLinks: CalculatorDeepLink[] = [];
+
+    while (
+      response.functionCalls &&
+      response.functionCalls.length > 0 &&
+      iterations < MAX_TOOL_ITERATIONS
+    ) {
       iterations++;
-      const functionResponses: any[] = [];
-      const modelParts: any[] = [];
+      const functionResponses: GeminiContentPart[] = [];
+      const modelParts: GeminiContentPart[] = [];
 
       for (const call of response.functionCalls) {
         const result = executeTool(call.name, call.args);
-        modelParts.push({ functionCall: { name: call.name, args: call.args } });
+        if (WRITE_TOOLS.has(call.name) && result?.success) {
+          executedToolsLog.push(
+            typeof result.message === 'string' ? result.message : call.name
+          );
+        }
+        if (Array.isArray(result?.calculatorLinks)) {
+          for (const lk of result.calculatorLinks) {
+            if (lk && typeof lk === 'object') executedCalculatorLinks.push(lk as CalculatorDeepLink);
+          }
+        }
+        modelParts.push({
+          functionCall: { name: call.name, args: call.args },
+        });
         functionResponses.push({
           functionResponse: {
             name: call.name,
-            response: result
-          }
+            response: result,
+          },
         });
       }
 
       currentContents.push({
         role: 'model',
-        parts: modelParts
+        parts: modelParts,
       });
 
       currentContents.push({
         role: 'user',
-        parts: functionResponses
+        parts: functionResponses,
       });
 
-      response = await generateWithTimeout({
-        model: 'gemini-2.5-flash',
-        contents: currentContents,
-        config: {
-          systemInstruction: SYSTEM_RULES,
-          tools: aiTools as any,
-        },
-      });
+      response = await callGeminiWithResilience(
+        ai,
+        currentContents,
+        systemRules
+      );
     }
 
-    if (!response || !response.text) {
-      return "Acción completada.";
+    let finalText = response?.text || 'Acción completada.';
+    if (executedToolsLog.length > 0 && !isVoice && !response?.text) {
+      finalText = `✅ Acciones ejecutadas: ${executedToolsLog.join(' | ')}`;
     }
 
-    return response.text;
+    if (!isVoice && executedCalculatorLinks.length > 0) {
+      for (const lk of executedCalculatorLinks) {
+        const tag = serializeCalculatorTag(lk);
+        if (!finalText.includes(tag)) {
+          finalText += `\n\n${tag}`;
+        }
+      }
+    }
+
+    return finalText;
   } catch (error) {
-    console.error("Error calling AI service:", error);
-    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[geminiService] Error procesando consulta IA:', error);
+    const classified = classifyLlmError(error);
 
-    if (errMsg.includes('API_KEY') || errMsg.includes('API key') || errMsg.includes('403') || errMsg.includes('401')) {
-      return "Error de autenticación: La API Key de Gemini no es válida o no tiene permisos. Verifícala en Configuración.";
-    }
-    if (errMsg.includes('429') || errMsg.includes('quota') || errMsg.includes('rate')) {
-      return "Límite de cuota alcanzado en la API. Por favor espera un minuto antes de consultar de nuevo.";
-    }
-    if (errMsg.includes('timeout')) {
-      return "La respuesta tardó más de lo esperado. Por favor intenta reformular tu pedido.";
-    }
-    if (errMsg.includes('network') || errMsg.includes('fetch') || errMsg.includes('ENOTFOUND')) {
-      return "Error de conexión: Verifica tu conexión a internet.";
+    if (classified.type === 'AUTH') {
+      return '🔑 **Error de autenticación:** La API Key de Google Gemini no es válida o fue revocada. Verificala en Configuración (⚙️).';
     }
 
-    return "Hubo un error al procesar la respuesta con el asistente inteligente. Por favor intenta de nuevo.";
+    if (classified.type === 'QUOTA') {
+      // Abrir circuit breaker por 25 segundos y responder con el motor local
+      quotaBreaker.blockedUntilMs = Date.now() + 25000;
+      return buildOfflineOrFallbackResponse(lastUserMessage, 'QUOTA', isVoice);
+    }
+
+    if (classified.type === 'NETWORK' || classified.type === 'TIMEOUT' || isClientOffline()) {
+      return buildOfflineOrFallbackResponse(
+        lastUserMessage,
+        'OFFLINE',
+        isVoice
+      );
+    }
+
+    return buildOfflineOrFallbackResponse(lastUserMessage, 'OFFLINE', isVoice);
   }
 };

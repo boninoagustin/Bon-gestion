@@ -597,14 +597,13 @@ export const aiActions = {
         if (rB.error) return { error: rB.error };
         const batch = rB.item!;
 
-        const prevF: Partial<Fermenter> = { status: ferm.status, currentBatchId: ferm.currentBatchId };
-        const prevB = { fermenterId: batch.fermenterId, fermenterName: batch.fermenterName };
+        const prevBatches = S().batches;
+        const prevFermenters = S().fermenters;
 
         S().assignBatchToFermenter(ferm.id, batch.id);
 
         pushUndo(`asignación de ${batch.lotCode} al ${ferm.name}`, () => {
-            S().updateFermenter(ferm.id, prevF);
-            S().updateBatch(batch.id, prevB);
+            useBreweryStore.setState({ batches: prevBatches, fermenters: prevFermenters });
         });
 
         return { success: true, message: `Lote ${batch.lotCode} (${batch.recipeName}) asignado a ${ferm.name}.` };

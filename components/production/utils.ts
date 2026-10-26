@@ -96,15 +96,29 @@ export const calculatePerLiterBreakdown = (batch: Batch) => {
     };
 };
 
+/**
+ * Semáforo industrial para estados de lotes de producción:
+ * - MASHING: Bronce/Ámbar (#d97706 / #f59e0b)
+ * - FERMENTING: Ámbar Dorado Activo (#f59e0b)
+ * - CONDITIONING: Azul Enfriamiento / Cold Crash (#0ea5e9 / #38bdf8)
+ * - PACKAGED: Verde Lúpulo (#10b981)
+ */
 export const getStatusColor = (status: BatchStatus) => {
     switch (status) {
-        case BatchStatus.PLANNED: return 'bg-slate-200 text-slate-700';
-        case BatchStatus.MASHING: return 'bg-orange-200 text-orange-800';
-        case BatchStatus.FERMENTING: return 'bg-yellow-200 text-yellow-800';
-        case BatchStatus.CONDITIONING: return 'bg-zinc-200 text-zinc-800';
-        case BatchStatus.PACKAGED: return 'bg-green-200 text-green-800';
-        case BatchStatus.COMPLETED: return 'bg-slate-600 text-slate-200';
-        default: return 'bg-slate-200 text-slate-700';
+        case BatchStatus.PLANNED:
+            return 'bg-slate-200 text-slate-700 dark:bg-[#22262b] dark:text-slate-300 border border-slate-300 dark:border-[#2c3138]';
+        case BatchStatus.MASHING:
+            return 'bg-[#d97706]/15 text-[#d97706] dark:text-[#f59e0b] border border-[#d97706]/35';
+        case BatchStatus.FERMENTING:
+            return 'bg-[#f59e0b]/15 text-[#d97706] dark:text-[#f59e0b] border border-[#f59e0b]/35';
+        case BatchStatus.CONDITIONING:
+            return 'bg-[#0ea5e9]/15 text-[#0284c7] dark:text-[#38bdf8] border border-[#0ea5e9]/35';
+        case BatchStatus.PACKAGED:
+            return 'bg-[#10b981]/15 text-[#059669] dark:text-[#34d399] border border-[#10b981]/35';
+        case BatchStatus.COMPLETED:
+            return 'bg-slate-700 text-slate-200 dark:bg-[#121417] dark:text-slate-400 border border-[#2c3138]';
+        default:
+            return 'bg-slate-200 text-slate-700 dark:bg-[#22262b] dark:text-slate-300';
     }
 };
 

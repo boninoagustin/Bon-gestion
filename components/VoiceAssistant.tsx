@@ -4,6 +4,7 @@ import { Mic, X, Loader2, Ear, Volume2, Sparkles } from 'lucide-react';
 import { analyzeBrewingData } from '../services/geminiService';
 import { useBreweryStore } from '../context/store';
 import { buildAppSummary, AI_EVENTS } from '../services/ai/actions';
+import { normalizeTranscript, toSpeechText, looksIncompleteUtterance } from '../services/ai/voiceText';
 
 export const VoiceAssistant: React.FC = () => {
     const [isListeningWakeWord, setIsListeningWakeWord] = useState(() => {
@@ -75,7 +76,9 @@ export const VoiceAssistant: React.FC = () => {
 
         setIsProcessing(true);
         try {
-            const history = [...conversationHistoryRef.current, { role: 'user' as const, content: command }];
+            // Pre-procesar texto de voz para que números dictados en palabras se normalicen a dígitos
+            const cleanCommand = normalizeTranscript(command);
+            const history = [...conversationHistoryRef.current.slice(-12), { role: 'user' as const, content: cleanCommand }];
             conversationHistoryRef.current = history;
 
             const appSummary = buildAppSummary();
@@ -114,15 +117,8 @@ export const VoiceAssistant: React.FC = () => {
 
         window.speechSynthesis.cancel();
 
-        // Limpiar cualquier markdown residual o caracteres que el TTS pueda deletrear
-        const cleanText = text
-            .replace(/\*/g, '')
-            .replace(/#/g, '')
-            .replace(/_/g, '')
-            .replace(/`/g, '')
-            .replace(/•/g, '')
-            .replace(/\|/g, '')
-            .trim();
+        // Optimizar pronunciación de números, densidades y unidades para sintetizador en español
+        const cleanText = toSpeechText(text);
 
         if (!cleanText) {
             closeAssistant();
@@ -303,17 +299,18 @@ export const VoiceAssistant: React.FC = () => {
         let currentTranscript = initialText;
         let hasError = false;
 
-        const resetSilenceTimer = () => {
+        const resetSilenceTimer = (textSnippet = '') => {
             if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+            // Si la última palabra indica que el usuario sigue dictando parámetros, dar más tiempo
+            const waitMs = looksIncompleteUtterance(textSnippet) ? 3600 : 2500;
             silenceTimerRef.current = setTimeout(() => {
                 if (activeRecognitionRef.current) {
                     try { activeRecognitionRef.current.stop(); } catch {}
                 }
-            }, 2600); // 2.6 segundos de silencio para cerrar turno
+            }, waitMs);
         };
 
         recognition.onresult = (event: any) => {
-            resetSilenceTimer();
             let interim = '';
             for (let i = event.resultIndex; i < event.results.length; i++) {
                 if (event.results[i].isFinal) {
@@ -323,6 +320,7 @@ export const VoiceAssistant: React.FC = () => {
                 }
             }
             currentTranscript = (finalTranscript + interim).trim();
+            resetSilenceTimer(currentTranscript);
             setCommandTranscript(currentTranscript);
         };
 
@@ -359,7 +357,9 @@ export const VoiceAssistant: React.FC = () => {
             }
 
             if (textToProcess) {
-                processCommand(textToProcess);
+                // Normalizar transcripción antes de procesar comando
+                const normalizedCommand = normalizeTranscript(textToProcess);
+                processCommand(normalizedCommand);
             } else {
                 setCommandTranscript('No se escuchó nada...');
                 setTimeout(() => closeAssistant(), 1800);
