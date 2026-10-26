@@ -10,9 +10,10 @@
  *    - *Circuit Breaker* temporal con respuesta determinista local para no dejar al cervecero sin datos operativos.
  * 3. Inyección automática de diagnóstico de desvíos de fermentación (`diagnoseFermentationDeviations`)
  *    en el contexto de cada consulta.
- * 4. Motor determinista local (`buildOfflineOrFallbackResponse`) que resuelve consultas de agenda,
- *    diagnóstico de fermentación (atenuación, diacetilo, autólisis, temperatura), inventario, tanques,
- *    barriles y finanzas aun sin conexión a internet o sin API Key configurada.
+ * 4. Motor determinista local (`buildOfflineOrFallbackResponse`) que resuelve directamente cálculos cerveceros
+ *    usando `lib/brewmath.ts` (volumen de olla, temperatura de strike, volumen de sparge, carbonatación CO2 en PSI,
+ *    ABV/atenuación, refractómetro, densímetro, acidificación y levadura), además de consultas de agenda,
+ *    diagnóstico de fermentación, inventario, tanques, barriles y finanzas aun sin internet o sin API Key.
  */
 
 import { GoogleGenAI } from '@google/genai';
@@ -24,9 +25,40 @@ import {
   FermentationDiagnosticAlert,
   getSystemRules,
 } from './ai/prompts';
-import { aiTools, executeTool, WRITE_TOOLS } from './ai/tools';
+import {
+  aiTools,
+  executeAbv,
+  executeAcidAddition,
+  executeCarbonation,
+  executeHydrometerTempCorrection,
+  executeKettleVolume,
+  executePitchRateAndStarter,
+  executeRefractometerCorrection,
+  executeSpargeWater,
+  executeStrikeWater,
+  executeTool,
+  WRITE_TOOLS,
+} from './ai/tools';
 import { tryOfflineCalculation } from './ai/calcTools';
-import { CalculatorDeepLink, serializeCalculatorTag } from './ai/calculatorBridge';
+import {
+  CalculatorDeepLink,
+  serializeCalculatorTag,
+  stripCalculatorTags,
+} from './ai/calculatorBridge';
+import { normalizeTranscript } from './ai/voiceText';
+import {
+  calculateABV,
+  calculateABVAdvanced,
+  calculateAcidAddition,
+  calculateCarbonationPressure,
+  calculateKettleVolume,
+  calculatePitchingRate,
+  calculateSpargeVolumes,
+  calculateStrikeTemp,
+  correctGravity,
+  correctRefractometerReading,
+  sanitizeGravity,
+} from '../lib/brewmath';
 
 // ============================================================================
 // 1. TIPOS ESTRICTOS DE MENSAJERÍA, PROVEEDORES Y CUOTAS
@@ -158,11 +190,10 @@ function classifyLlmError(error: unknown): {
     lower.includes('rate limit') ||
     lower.includes('too many requests')
   ) {
-    // Extraer segundos sugeridos si vienen en el mensaje (ej. "retry in 18s")
     const retryMatch = raw.match(/retry\s+in\s+(\d+(?:\.\d+)?)\s*s/i);
     const parsedDelayMs = retryMatch
-      ? Math.min(30000, Math.ceil(Number(retryMatch[1]) * 1000))
-      : 2000;
+    ? Math.min(30000, Math.ceil(Number(retryMatch[1]) * 1000))
+    : 2000;
     return {
       type: 'QUOTA',
       retryable: true,
@@ -232,7 +263,7 @@ function resolveGeminiApiKey(settings?: BrewerySettings): string {
   }
   try {
     const viteEnv = (import.meta as unknown as { env?: Record<string, string> })
-      ?.env;
+    ?.env;
     if (viteEnv?.VITE_GEMINI_API_KEY) {
       return viteEnv.VITE_GEMINI_API_KEY.trim();
     }
@@ -260,13 +291,13 @@ function buildLiveDiagnosticContext(): {
     return {
       alerts: [],
       summaryText:
-        'Sin desvíos críticos de fermentación detectados en los lotes activos.',
+      'Sin desvíos críticos de fermentación detectados en los lotes activos.',
     };
   }
 
   const lines = alerts.map(
     (a) =>
-      `- [${a.severity}] Lote ${a.lotCode} (${a.recipeName}${a.fermenterName ? ` en ${a.fermenterName}` : ''}): ${a.title}. Hallazgo: ${a.technicalFinding} Acción sugerida: ${a.recommendedAction}`
+    `- [${a.severity}] Lote ${a.lotCode} (${a.recipeName}${a.fermenterName ? ` en ${a.fermenterName}` : ''}): ${a.title}. Hallazgo: ${a.technicalFinding} Acción sugerida: ${a.recommendedAction}`
   );
 
   return {
@@ -280,17 +311,129 @@ function buildLiveDiagnosticContext(): {
 // ============================================================================
 
 /**
+ * Parser determinista por regex/keywords en `geminiService.ts` que ejecuta directamente
+ * las funciones matemáticas de `lib/brewmath.ts` cuando no hay conexión o la cuota está agotada.
+ */
+function parseDirectOfflineBrewMath(userQuery: string, isVoiceMode: boolean): string | null {
+  if (!userQuery) return null;
+  const normalized = normalizeTranscript(userQuery);
+  const q = normalized
+  .toLowerCase()
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '');
+
+  const extractNum = (patterns: RegExp[]): number | undefined => {
+    for (const re of patterns) {
+      const m = q.match(re);
+      if (m && m[1]) {
+        const val = Number(m[1].replace(',', '.'));
+        if (Number.isFinite(val)) return val;
+      }
+    }
+    return undefined;
+  };
+
+  // A. Volumen de olla por geometría cilíndrica (`calculateKettleVolume`)
+  if (/volumen.*olla|olla.*alto|olla.*diametro|olla.*volumen|litros.*olla|olla.*litros/.test(q)) {
+    const diameter = extractNum([
+      /(\d+(?:[.,]\d+)?)\s*(?:cm|centimetros?)?\s*(?:de\s+)?diametro/,
+                                /diametro\s*(?:de\s+|:\s*|\s+)?(\d+(?:[.,]\d+)?)/,
+    ]);
+    const height = extractNum([
+      /(\d+(?:[.,]\d+)?)\s*(?:cm|centimetros?)?\s*(?:de\s+)?(?:alto|altura|liquido)/,
+                              /(?:alto|altura|liquido|profundidad)\s*(?:de\s+|:\s*|\s+)?(\d+(?:[.,]\d+)?)/,
+    ]);
+
+    if (diameter !== undefined && height !== undefined) {
+      const volL = calculateKettleVolume(diameter, height);
+      const res = executeKettleVolume({ diameterCm: diameter, liquidHeightCm: height });
+      if (res.success && volL > 0) {
+        if (isVoiceMode) {
+          return `${res.spokenSummary as string} (Calculado con motor local offline)`;
+        }
+        const tag = res.calculatorLinks?.[0] ? `\n\n${serializeCalculatorTag(res.calculatorLinks[0])}` : '';
+        return `**${res.summary}**\n\n*(Calculado con motor local offline)*${tag}`;
+      }
+    }
+    return 'Para calcularte el volumen exacto de la olla necesito dos datos: el diámetro interior en cm y la altura del líquido en cm. ¿Qué medidas tenés?';
+  }
+
+  // B. Carbonatación forzada en PSI / bar (`calculateCarbonationPressure`)
+  if (/carbonat.*psi|psi.*temperatura|carbonat|psi|barril.*co2|presion.*co2/.test(q)) {
+    const temp = extractNum([
+      /(?:temp|temperatura|a)\s*(-?\d+(?:[.,]\d+)?)\s*(?:°|grados|c\b)/,
+                            /(-?\d+(?:[.,]\d+)?)\s*(?:°\s*c|grados)/,
+    ]);
+    const vols = extractNum([
+      /(\d+(?:[.,]\d+)?)\s*(?:vol|volumenes|vols)/,
+                            /(?:volumenes|vols?)\s*(?:de\s+)?(\d+(?:[.,]\d+)?)/,
+    ]);
+
+    if (temp !== undefined && vols !== undefined) {
+      const carb = calculateCarbonationPressure(temp, vols);
+      const res = executeCarbonation({ beerTempC: temp, targetCO2Volumes: vols });
+      if (res.success && carb.psi >= 0) {
+        if (isVoiceMode) {
+          return `${res.spokenSummary as string} (Calculado con motor local offline)`;
+        }
+        const tag = res.calculatorLinks?.[0] ? `\n\n${serializeCalculatorTag(res.calculatorLinks[0])}` : '';
+        return `**${res.summary}**\n\n*(Calculado con motor local offline)*${tag}`;
+      }
+    }
+    return 'Para calcularte la presión de carbonatación en PSI necesito saber la temperatura de la cerveza en el barril (°C) y los volúmenes de CO2 objetivo. ¿Qué valores tenés?';
+  }
+
+  // C. Alcohol ABV y Atenuación (`calculateABV` / `calculateABVAdvanced`)
+  if (/abv.*og.*fg|alcohol.*1\.\d{3}|\babv\b|alcohol|atenuacion/.test(q)) {
+    const gravities = Array.from(q.matchAll(/\b(1[.,]\d{3}|\d{4})\b/g)).map((m) => {
+      const n = Number(m[1].replace(',', '.'));
+      return n >= 980 && n <= 1200 ? n / 1000 : n;
+    });
+
+    let og: number | undefined;
+    let fg: number | undefined;
+    if (gravities.length >= 2) {
+      const sorted = [...gravities].sort((a, b) => b - a);
+      og = sorted[0];
+      fg = sorted[1];
+    } else {
+      const ogMatch = q.match(/(?:og|inicial|original)\D*(\d+(?:[.,]\d+)?)/);
+      const fgMatch = q.match(/(?:fg|final)\D*(\d+(?:[.,]\d+)?)/);
+      if (ogMatch) og = sanitizeGravity(ogMatch[1], 0);
+      if (fgMatch) fg = sanitizeGravity(fgMatch[1], 0);
+    }
+
+    if (og && fg && og > fg) {
+      const abvVal = calculateABV(og, fg);
+      const advVal = calculateABVAdvanced(og, fg);
+      const res = executeAbv({ og, fg });
+      if (res.success && abvVal >= 0 && advVal.abv >= 0) {
+        if (isVoiceMode) {
+          return `${res.spokenSummary as string} (Calculado con motor local offline)`;
+        }
+        const tag = res.calculatorLinks?.[0] ? `\n\n${serializeCalculatorTag(res.calculatorLinks[0])}` : '';
+        return `**${res.summary}**\n\n*(Calculado con motor local offline)*${tag}`;
+      }
+    }
+    return 'Para calcular el porcentaje de alcohol (ABV) necesito la Densidad Original (OG) y la Densidad Final (FG). ¿Cuáles mediste?';
+  }
+
+  // D. Delegar resto de calculadoras de brewmath.ts (strike, sparge, refractómetro, densímetro, ácido, pitch)
+  return tryOfflineCalculation(userQuery, isVoiceMode);
+}
+
+/**
  * Genera una respuesta operativa completa y precisa usando exclusivamente la base de datos local
- * cuando el usuario no tiene conexión a internet, se alcanzó el límite de cuota de la API
- * o aún no configuró su API Key.
+ * y las funciones matemáticas puras de `lib/brewmath.ts` cuando el usuario no tiene conexión
+ * a internet, se alcanzó el límite de cuota de la API o aún no configuró su API Key.
  */
 export function buildOfflineOrFallbackResponse(
   userQuery: string,
   reason: 'OFFLINE' | 'QUOTA' | 'NO_API_KEY',
   isVoiceMode: boolean = false
 ): string {
-  // 0. Parser determinista de cálculos con las funciones de brewmath.ts
-  const calcResult = tryOfflineCalculation(userQuery, isVoiceMode);
+  // 0. Parser determinista de cálculos con las funciones de lib/brewmath.ts
+  const calcResult = parseDirectOfflineBrewMath(userQuery, isVoiceMode);
   if (calcResult) {
     return calcResult;
   }
@@ -300,26 +443,26 @@ export function buildOfflineOrFallbackResponse(
   const { alerts } = buildLiveDiagnosticContext();
 
   const statusBadge =
-    reason === 'OFFLINE'
-      ? '📡 *(Modo Sin Conexión activo: respuesta generada con el motor local de ingeniería sobre tus datos en IndexedDB)*'
-      : reason === 'QUOTA'
-      ? '⏳ *(Límite temporal de cuota en la nube alcanzado: respuesta inmediata generada por el motor local de BON)*'
-      : '💡 *(Modo Local Activo: cargá tu API Key en Configuración ⚙️ para habilitar conversación libre con LLM)*';
+  reason === 'OFFLINE'
+  ? '📡 *(Calculado con motor local offline — Sin conexión a internet)*'
+  : reason === 'QUOTA'
+  ? '⏳ *(Calculado con motor local offline — Cuota temporal de API agotada)*'
+  : '💡 *(Calculado con motor local offline — Configurá tu API Key en Configuración ⚙️ para habilitar conversación libre con LLM)*';
 
   // Modo Voz: respuesta directa y hablada sin markdown
   if (isVoiceMode) {
     const briefing = executeTool('get_daily_briefing', {});
     const occupiedCount = Array.isArray(briefing.occupiedFermenters)
-      ? briefing.occupiedFermenters.length
-      : 0;
+    ? briefing.occupiedFermenters.length
+    : 0;
     const dirtyCount = Array.isArray(briefing.dirtyFermenters)
-      ? briefing.dirtyFermenters.length
-      : 0;
+    ? briefing.dirtyFermenters.length
+    : 0;
     const alertText =
-      alerts.length > 0
-        ? ` Atención: detecté ${alerts.length} desvío de fermentación en ${alerts[0].recipeName}.`
-        : '';
-    return `Estoy operando en modo local. Tenés ${occupiedCount} fermentadores ocupados y ${dirtyCount} tanques sucios para limpieza.${alertText}`;
+    alerts.length > 0
+    ? ` Atención: detecté ${alerts.length} desvío de fermentación en ${alerts[0].recipeName}.`
+    : '';
+    return `Estoy operando con el motor local offline. Tenés ${occupiedCount} fermentadores ocupados y ${dirtyCount} tanques sucios para limpieza.${alertText}`;
   }
 
   // 1. Consultas de diagnóstico de fermentación, calidad, atenuación, diacetilo o autólisis
@@ -366,8 +509,8 @@ export function buildOfflineOrFallbackResponse(
       list.forEach((f: Record<string, unknown>) => {
         const cb = f.currentBatch as Record<string, unknown> | null;
         const batchInfo = cb
-          ? ` → **Ocupado** con ${String(cb.recipeName)} (${String(cb.lotCode)}) — Día ${String(cb.daysInTank ?? '?')}, OG ${String(cb.originalGravity ?? '?')}${cb.lastGravity ? `, SG actual ${String(cb.lastGravity)}` : ''}${cb.lastTemperature !== undefined ? `, ${String(cb.lastTemperature)}°C` : ''}`
-          : ` → Estado: **${String(f.status)}**`;
+        ? ` → **Ocupado** con ${String(cb.recipeName)} (${String(cb.lotCode)}) — Día ${String(cb.daysInTank ?? '?')}, OG ${String(cb.originalGravity ?? '?')}${cb.lastGravity ? `, SG actual ${String(cb.lastGravity)}` : ''}${cb.lastTemperature !== undefined ? `, ${String(cb.lastTemperature)}°C` : ''}`
+        : ` → Estado: **${String(f.status)}**`;
         out.push(`- **${String(f.name)}** (${String(f.capacity)}L)${batchInfo}`);
       });
       out.push(
@@ -392,8 +535,8 @@ export function buildOfflineOrFallbackResponse(
   ) {
     const invRes = executeTool('query_inventory', {});
     const items = Array.isArray(invRes.items)
-      ? (invRes.items as Record<string, unknown>[])
-      : [];
+    ? (invRes.items as Record<string, unknown>[])
+    : [];
     const out: string[] = ['### 📦 Auditoría de Inventario e Insumos\n'];
     const outOfStock = items.filter((i) => i.status === 'OUT_OF_STOCK');
     const lowStock = items.filter((i) => i.status === 'LOW_STOCK');
@@ -433,9 +576,9 @@ export function buildOfflineOrFallbackResponse(
       `- **Costos fijos mensuales configurados:** $${Number(fin.fixedCostsConfiguredMonthly ?? 0).toLocaleString('es-AR')}`,
     ];
     const debtors = state.customers
-      .filter((c) => c.debt > 0)
-      .sort((a, b) => b.debt - a.debt)
-      .slice(0, 5);
+    .filter((c) => c.debt > 0)
+    .sort((a, b) => b.debt - a.debt)
+    .slice(0, 5);
     if (debtors.length > 0) {
       out.push(
         `\n**Principales cuentas por cobrar:**\n${debtors.map((c) => `- **${c.name}:** $${c.debt.toLocaleString('es-AR')}${c.contact ? ` (${c.contact})` : ''}`).join('\n')}`
@@ -449,26 +592,26 @@ export function buildOfflineOrFallbackResponse(
   if (q.includes('lote') || q.includes('produccion') || q.includes('producción')) {
     const batchesRes = executeTool('get_active_batches', {});
     const active = Array.isArray(batchesRes.activeBatches)
-      ? (batchesRes.activeBatches as Record<string, unknown>[])
-      : [];
+    ? (batchesRes.activeBatches as Record<string, unknown>[])
+    : [];
     const out: string[] = ['### 🍺 Lotes Activos en Producción\n'];
     if (active.length > 0) {
       active.forEach((b) => {
         const ferm = b.fermenterName ? ` en **${String(b.fermenterName)}**` : '';
         const days =
-          b.daysSinceBrew !== undefined ? ` (Día ${String(b.daysSinceBrew)})` : '';
-        const grav = b.lastGravityReading
-          ? ` | SG actual: ${String(b.lastGravityReading)}`
-          : b.originalGravity
-          ? ` | OG: ${String(b.originalGravity)}`
-          : '';
-        const temp =
-          b.lastTemperatureReading !== undefined
-            ? ` | Temp: ${String(b.lastTemperatureReading)}°C`
-            : '';
-        out.push(
-          `- **${String(b.recipeName)}** [${String(b.lotCode)}] — **${String(b.status)}**${ferm}${days}${grav}${temp}`
-        );
+        b.daysSinceBrew !== undefined ? ` (Día ${String(b.daysSinceBrew)})` : '';
+      const grav = b.lastGravityReading
+      ? ` | SG actual: ${String(b.lastGravityReading)}`
+      : b.originalGravity
+      ? ` | OG: ${String(b.originalGravity)}`
+      : '';
+      const temp =
+      b.lastTemperatureReading !== undefined
+      ? ` | Temp: ${String(b.lastTemperatureReading)}°C`
+      : '';
+      out.push(
+        `- **${String(b.recipeName)}** [${String(b.lotCode)}] — **${String(b.status)}**${ferm}${days}${grav}${temp}`
+      );
       });
     } else {
       out.push('No hay lotes activos en este momento.');
@@ -482,8 +625,8 @@ export function buildOfflineOrFallbackResponse(
   const out: string[] = ['### 📋 Resumen Operativo y de Ingeniería de Planta\n'];
 
   const eventsToday = Array.isArray(b.eventsToday)
-    ? (b.eventsToday as Record<string, unknown>[])
-    : [];
+  ? (b.eventsToday as Record<string, unknown>[])
+  : [];
   if (eventsToday.length > 0) {
     out.push(
       `**📅 Agenda de Hoy:**\n${eventsToday.map((e) => `- ${String(e.title)}`).join('\n')}\n`
@@ -503,8 +646,8 @@ export function buildOfflineOrFallbackResponse(
   }
 
   const dirtyF = Array.isArray(b.dirtyFermenters)
-    ? (b.dirtyFermenters as Record<string, unknown>[])
-    : [];
+  ? (b.dirtyFermenters as Record<string, unknown>[])
+  : [];
   const dirtyK = Array.isArray(b.dirtyKegs) ? (b.dirtyKegs as string[]) : [];
   if (dirtyF.length > 0 || dirtyK.length > 0) {
     out.push('**🧼 Limpieza y Sanitización (CIP):**');
@@ -522,8 +665,8 @@ export function buildOfflineOrFallbackResponse(
   }
 
   const topDebtors = Array.isArray(b.topDebtors)
-    ? (b.topDebtors as Record<string, unknown>[])
-    : [];
+  ? (b.topDebtors as Record<string, unknown>[])
+  : [];
   if (topDebtors.length > 0) {
     out.push('**💸 Cobranzas Prioritarias:**');
     topDebtors.forEach((c) => {
@@ -535,11 +678,11 @@ export function buildOfflineOrFallbackResponse(
   }
 
   const outOfStock = Array.isArray(b.outOfStock)
-    ? (b.outOfStock as string[])
-    : [];
+  ? (b.outOfStock as string[])
+  : [];
   const lowStock = Array.isArray(b.lowStock)
-    ? (b.lowStock as Record<string, unknown>[])
-    : [];
+  ? (b.lowStock as Record<string, unknown>[])
+  : [];
   if (outOfStock.length > 0 || lowStock.length > 0) {
     out.push('**📦 Alertas de Stock:**');
     if (outOfStock.length > 0) {
@@ -579,19 +722,18 @@ async function callGeminiWithResilience(
           ai.models.generateContent({
             model: modelName,
             contents: contents as unknown as Parameters<
-              typeof ai.models.generateContent
+            typeof ai.models.generateContent
             >[0]['contents'],
             config: {
               systemInstruction,
               tools: aiTools as unknown as NonNullable<
-                Parameters<typeof ai.models.generateContent>[0]['config']
+              Parameters<typeof ai.models.generateContent>[0]['config']
               >['tools'],
             },
           }),
           timeoutPromise,
         ])) as GeminiResponseShape;
 
-        // Éxito: resetear contador de rate limits
         quotaBreaker.consecutiveRateLimits = 0;
         quotaBreaker.blockedUntilMs = 0;
         quotaBreaker.lastErrorReason = null;
@@ -601,12 +743,10 @@ async function callGeminiWithResilience(
         lastError = err;
         const classified = classifyLlmError(err);
 
-        // Si es error de autenticación o red caída, no reintentar
         if (classified.type === 'AUTH' || classified.type === 'NETWORK') {
           throw err;
         }
 
-        // Si es cuota agotada (429), aplicamos backoff corto en intento 0 y pasamos al modelo secundario en intento 1
         if (classified.type === 'QUOTA') {
           quotaBreaker.consecutiveRateLimits += 1;
           quotaBreaker.lastErrorReason = classified.message;
@@ -615,7 +755,6 @@ async function callGeminiWithResilience(
             await sleepMs(Math.min(2500, classified.retryDelayMs + jitter));
             continue;
           }
-          // Cambiar al siguiente modelo en GEMINI_MODEL_CASCADE
           break;
         }
 
@@ -637,6 +776,25 @@ async function callGeminiWithResilience(
 // 6. FUNCIÓN PRINCIPAL analyzeBrewingData
 // ============================================================================
 
+/**
+ * Combina contexto multi-turno reciente cuando el usuario está respondiendo un slot-filling
+ * en modo offline (ej. Turno 1: "calculame el volumen de la olla", Turno 2: "35 de diametro y 58 de alto").
+ */
+function buildEffectiveOfflineQuery(messagesHistory: ChatHistoryMessage[]): string {
+  const lastUserMessage = messagesHistory[messagesHistory.length - 1]?.content || '';
+  if (messagesHistory.length < 2) return lastUserMessage;
+
+  const recentUserTurns = messagesHistory
+  .slice(-4)
+  .filter((m) => m.role === 'user')
+  .map((m) => m.content);
+
+  if (recentUserTurns.length >= 2 && lastUserMessage.trim().split(/\s+/).length <= 8) {
+    return recentUserTurns.join(' ');
+  }
+  return lastUserMessage;
+}
+
 export const analyzeBrewingData = async (
   messagesHistory: ChatHistoryMessage[],
   appData: string,
@@ -644,17 +802,16 @@ export const analyzeBrewingData = async (
   options: AnalyzeOptions = {}
 ): Promise<string> => {
   const isVoice = Boolean(options.isVoiceMode);
-  const lastUserMessage =
-    messagesHistory[messagesHistory.length - 1]?.content || '';
+  const effectiveOfflineQuery = buildEffectiveOfflineQuery(messagesHistory);
 
   // 1. Fallback inmediato si el dispositivo no tiene conexión a internet
   if (isClientOffline()) {
-    return buildOfflineOrFallbackResponse(lastUserMessage, 'OFFLINE', isVoice);
+    return buildOfflineOrFallbackResponse(effectiveOfflineQuery, 'OFFLINE', isVoice);
   }
 
   // 2. Verificar si el circuit breaker de cuota está activo
   if (Date.now() < quotaBreaker.blockedUntilMs) {
-    return buildOfflineOrFallbackResponse(lastUserMessage, 'QUOTA', isVoice);
+    return buildOfflineOrFallbackResponse(effectiveOfflineQuery, 'QUOTA', isVoice);
   }
 
   try {
@@ -666,10 +823,10 @@ export const analyzeBrewingData = async (
 
     const { summaryText: diagnosticSummary } = buildLiveDiagnosticContext();
 
-    // Preparar historial normalizado inyectando el estado de planta + diagnóstico de fermentación en el último turno
+    // Preparar historial normalizado limpiando tags internos de UI y preservando el hilo multi-turno
     const contents: NormalizedChatMessage[] = messagesHistory.map(
       (msg, index) => {
-        let textToSend = msg.content || '';
+        let textToSend = stripCalculatorTags(msg.content || '');
 
         if (index === messagesHistory.length - 1 && msg.role === 'user') {
           const dateTimeStr = new Date().toLocaleString('es-AR', {
@@ -682,7 +839,7 @@ export const analyzeBrewingData = async (
           });
           textToSend = buildContextPrompt(
             appData,
-            msg.content,
+            textToSend,
             dateTimeStr,
             diagnosticSummary
           );
@@ -697,12 +854,13 @@ export const analyzeBrewingData = async (
 
     const filteredContents = contents.filter(
       (c) =>
-        !(
-          c.role === 'assistant' &&
-          c.content &&
-          (c.content.includes('Soy BrewMaster AI') ||
-            c.content.includes('Conversación reseteada'))
-        )
+      !(
+        c.role === 'assistant' &&
+        c.content &&
+        (c.content.includes('Soy BrewMaster AI') ||
+        c.content.includes('Soy BON, tu asistente por voz') ||
+        c.content.includes('Conversación reseteada'))
+      )
     );
 
     const trimmedContents = filteredContents.slice(-20);
@@ -712,9 +870,9 @@ export const analyzeBrewingData = async (
     // ------------------------------------------------------------------------
     if (settings?.aiProvider === 'chatgpt') {
       const win =
-        typeof window !== 'undefined'
-          ? (window as unknown as ElectronApiWindow)
-          : undefined;
+      typeof window !== 'undefined'
+      ? (window as unknown as ElectronApiWindow)
+      : undefined;
       if (win?.electronAPI?.askOpenAI) {
         const openAiMessages: NormalizedChatMessage[] = [
           { role: 'system', content: systemRules },
@@ -738,7 +896,7 @@ export const analyzeBrewingData = async (
             const classified = classifyLlmError(new Error(response.error));
             if (classified.type === 'NETWORK' || classified.type === 'QUOTA') {
               return buildOfflineOrFallbackResponse(
-                lastUserMessage,
+                effectiveOfflineQuery,
                 classified.type === 'NETWORK' ? 'OFFLINE' : 'QUOTA',
                 isVoice
               );
@@ -765,10 +923,11 @@ export const analyzeBrewingData = async (
                   if (lk && typeof lk === 'object') executedCalculatorLinks.push(lk as CalculatorDeepLink);
                 }
               }
+              const { calculatorLinks: _omitLinks, ...cleanRes } = res;
               toolResultsForChat.push({
                 toolCallId: call.id || call.name,
                 toolName: call.name,
-                result: res,
+                result: cleanRes,
               });
             }
 
@@ -816,7 +975,7 @@ export const analyzeBrewingData = async (
 
     if (!apiKey) {
       return buildOfflineOrFallbackResponse(
-        lastUserMessage,
+        effectiveOfflineQuery,
         'NO_API_KEY',
         isVoice
       );
@@ -860,13 +1019,14 @@ export const analyzeBrewingData = async (
             if (lk && typeof lk === 'object') executedCalculatorLinks.push(lk as CalculatorDeepLink);
           }
         }
+        const { calculatorLinks: _omitLinks, ...cleanResult } = result;
         modelParts.push({
           functionCall: { name: call.name, args: call.args },
         });
         functionResponses.push({
           functionResponse: {
             name: call.name,
-            response: result,
+            response: cleanResult,
           },
         });
       }
@@ -912,19 +1072,18 @@ export const analyzeBrewingData = async (
     }
 
     if (classified.type === 'QUOTA') {
-      // Abrir circuit breaker por 25 segundos y responder con el motor local
       quotaBreaker.blockedUntilMs = Date.now() + 25000;
-      return buildOfflineOrFallbackResponse(lastUserMessage, 'QUOTA', isVoice);
+      return buildOfflineOrFallbackResponse(effectiveOfflineQuery, 'QUOTA', isVoice);
     }
 
     if (classified.type === 'NETWORK' || classified.type === 'TIMEOUT' || isClientOffline()) {
       return buildOfflineOrFallbackResponse(
-        lastUserMessage,
+        effectiveOfflineQuery,
         'OFFLINE',
         isVoice
       );
     }
 
-    return buildOfflineOrFallbackResponse(lastUserMessage, 'OFFLINE', isVoice);
+    return buildOfflineOrFallbackResponse(effectiveOfflineQuery, 'OFFLINE', isVoice);
   }
 };

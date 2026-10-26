@@ -1,14 +1,21 @@
 /**
- * @fileoverview tools.ts — Declaraciones de Function Calling tipadas rígidamente y validador
- * pre-ejecución para el Agente de Ingeniería Cervecera y Operaciones de Bon-Gestión.
+ * @fileoverview tools.ts — Declaraciones de Function Calling tipadas rígidamente, validadores
+ * de sanitización estricta y ejecutores de ingeniería cervecera y operaciones para Bon-Gestión.
  *
- * Incluye las 4 herramientas troncales requeridas con validación estricta antes de tocar IndexedDB/Zustand:
- * 1. `query_inventory`: Auditoría tipada de stock con filtros por categoría, umbral mínimo y valorización.
- * 2. `schedule_batch`: Programación transaccional de cocción validando fecha, receta, stock de insumos y capacidad de fermentador.
- * 3. `update_fermenter_temperature`: Control de setpoint térmico del fermentador con validación de rango físico (-5°C a 38°C),
- *    detección de riesgo de choque térmico/diacetilo y registro automático en el historial de fermentación del lote activo.
- * 4. `calculate_recipe_metrics`: Simulación físico-química integral de receta (OG, FG, ABV Hall/Lineal, IBU Tinseth paso a paso + geometría,
- *    Color Morey SRM/EBC, relación BU:GU, tasa de inoculación de levadura y validación de estilo BJCP).
+ * Conecta de forma integral todas las funciones matemáticas de `lib/brewmath.ts`:
+ * - `calculate_kettle_volume`: Volumen geométrico cilíndrico (diámetro y altura de líquido).
+ * - `calculate_strike_water`: Temperatura de agua de empaste (Palmer) y volumen inicial.
+ * - `calculate_sparge_water`: Balance hídrico de lavado (sparge), absorción y pre-hervor.
+ * - `calculate_carbonation`: Presión manométrica de CO2 (PSI, bar y kPa) según temperatura.
+ * - `calculate_refractometer_correction`: Corrección de refractómetro con alcohol (Terrill/Novotny).
+ * - `calculate_hydrometer_temp_correction`: Corrección de densímetro por temperatura (Thiesen).
+ * - `calculate_pitch_rate_and_starter`: Tasa de inoculación celular, viabilidad y starter con DME.
+ * - `calculate_acid_addition`: Dosificación de ácido láctico, fosfórico o cítrico para pH de macerado.
+ * - `calculate_dilution_and_boiloff`: Ajuste de gravedad por dilución con agua o evaporación.
+ * - `calculate_abv`, `calculate_ibu`, `calculate_priming`, `calculate_srm`, `calculate_recipe_metrics`.
+ *
+ * Incluye además las herramientas operativas de planta (`query_inventory`, `schedule_batch`,
+ * `update_fermenter_temperature`, `diagnose_fermentation`, fermentadores, barriles, finanzas y CRM).
  */
 
 import { useBreweryStore } from '../../context/store';
@@ -21,15 +28,26 @@ import {
   Ingredient,
 } from '../../types';
 import {
+  AcidType,
   calculateABV,
   calculateABVAdvanced,
+  calculateAcidAddition,
+  calculateCarbonationPressure,
+  calculateDilutionWater,
+  calculateKettleVolume,
   calculateMoreyColor,
   calculatePitchingRate,
   calculatePriming,
+  calculateSpargeVolumes,
+  calculateStrikeTemp,
   calculateTinsethIBUBreakdown,
+  calculateYeastStarter,
+  correctGravity,
+  correctRefractometerReading,
   HopAdditionInput,
   HopAdditionStage,
   HopFormType,
+  RefractometerModel,
   sanitizeGravity,
   sanitizeNumber,
   sanitizePositiveNumber,
@@ -40,13 +58,121 @@ import {
 import { BJCP_STYLES, validateParameter } from '../../lib/bjcp';
 import { aiActions, localToday, normalizeText, ToolResult } from './actions';
 import { diagnoseFermentationDeviations } from './prompts';
-import { calcToolDeclarations, calcToolHandlers } from './calcTools';
+import {
+  calcToolDeclarations,
+  calcToolHandlers,
+  CALC_TOOL_NAMES,
+  executeAbv,
+  executeAcidAddition,
+  executeCarbonation,
+  executeDilutionAndBoiloff,
+  executeHydrometerTempCorrection,
+  executeKettleVolume,
+  executePitchRateAndStarter,
+  executePriming,
+  executeRefractometerCorrection,
+  executeSpargeWater,
+  executeStrikeWater,
+} from './calcTools';
+
+export {
+  calcToolDeclarations,
+  calcToolHandlers,
+  CALC_TOOL_NAMES,
+  executeAbv,
+  executeAcidAddition,
+  executeCarbonation,
+  executeDilutionAndBoiloff,
+  executeHydrometerTempCorrection,
+  executeKettleVolume,
+  executePitchRateAndStarter,
+  executePriming,
+  executeRefractometerCorrection,
+  executeSpargeWater,
+  executeStrikeWater,
+};
 
 // ============================================================================
-// 1. TIPADO RÍGIDO DE ARGUMENTOS PARA FUNCTION CALLING
+// 1. TIPADO RÍGIDO DE ARGUMENTOS PARA FUNCTION CALLING Y CALCULADORAS
 // ============================================================================
 
 export type IngredientCategory = Ingredient['type'];
+
+/** Argumentos tipados para `calculate_kettle_volume` */
+export interface CalculateKettleVolumeArgs {
+  diameterCm: number;
+  liquidHeightCm: number;
+  kettleHeightCm?: number;
+  emptyFromRimCm?: number;
+}
+
+/** Argumentos tipados para `calculate_strike_water` */
+export interface CalculateStrikeWaterArgs {
+  grainWeightKg: number;
+  targetMashTempC: number;
+  grainTempC?: number;
+  waterToGrainRatioLKg?: number;
+  thermalLossC?: number;
+}
+
+/** Argumentos tipados para `calculate_sparge_water` */
+export interface CalculateSpargeWaterArgs {
+  preBoilVolumeL: number;
+  grainWeightKg: number;
+  waterToGrainRatioLKg?: number;
+  absorptionLPerKg?: number;
+  deadSpaceL?: number;
+}
+
+/** Argumentos tipados para `calculate_carbonation` */
+export interface CalculateCarbonationArgs {
+  beerTempC: number;
+  targetCO2Volumes: number;
+  styleId?: string;
+}
+
+/** Argumentos tipados para `calculate_refractometer_correction` */
+export interface CalculateRefractometerCorrectionArgs {
+  originalBrix: number;
+  currentBrix: number;
+  wortCorrectionFactor?: number;
+  model?: RefractometerModel;
+}
+
+/** Argumentos tipados para `calculate_hydrometer_temp_correction` */
+export interface CalculateHydrometerTempCorrectionArgs {
+  measuredGravity: number;
+  measuredTempC: number;
+  calibrationTempC?: number;
+}
+
+/** Argumentos tipados para `calculate_pitch_rate_and_starter` */
+export interface CalculatePitchRateAndStarterArgs {
+  volumeL: number;
+  targetOG: number;
+  yeastType?: YeastPitchStyle;
+  yeastFormat?: 'LIQUID' | 'DRY';
+  manufactureDate?: string;
+  viabilityPercent?: number;
+  cellsPerPackBillions?: number;
+  packsAvailable?: number;
+}
+
+/** Argumentos tipados para `calculate_acid_addition` */
+export interface CalculateAcidAdditionArgs {
+  waterVolumeL: number;
+  alkalinityPpm: number;
+  targetPh?: number;
+  acidType?: AcidType;
+}
+
+/** Argumentos tipados para `calculate_dilution_and_boiloff` */
+export interface CalculateDilutionAndBoiloffArgs {
+  currentGravity: number;
+  currentVolumeL: number;
+  targetGravity: number;
+  evaporationRateLPerHour?: number;
+}
 
 /** Argumentos tipados para `query_inventory` */
 export interface QueryInventoryArgs {
@@ -157,7 +283,7 @@ export type ValidationResult<T> =
   | { valid: false; error: string; data?: never };
 
 // ============================================================================
-// 2. VALIDADORES PRE-EJECUCIÓN DE ARGUMENTOS (GUARDRAILS DE BASE DE DATOS)
+// 2. VALIDADORES PRE-EJECUCIÓN DE ARGUMENTOS (GUARDRAILS DE BASE DE DATOS Y CÁLCULO)
 // ============================================================================
 
 const VALID_CATEGORIES: readonly IngredientCategory[] = [
@@ -185,6 +311,39 @@ const VALID_YEAST_STYLES: readonly YeastPitchStyle[] = [
   'HIGH_GRAVITY_ALE',
   'HIGH_GRAVITY_LAGER',
 ];
+
+/**
+ * Valida y sanitiza estrictamente los argumentos de `calculate_kettle_volume` usando `sanitizePositiveNumber`.
+ */
+export function validateKettleVolumeArgs(
+  raw: Record<string, unknown>
+): ValidationResult<CalculateKettleVolumeArgs> {
+  const diameterCm = sanitizePositiveNumber(
+    raw.diameterCm ?? raw.diameter ?? raw.diametro,
+    0,
+    600
+  );
+  const liquidHeightCm = sanitizePositiveNumber(
+    raw.liquidHeightCm ?? raw.height ?? raw.altura,
+    0,
+    800
+  );
+  if (diameterCm <= 0 || liquidHeightCm <= 0) {
+    return {
+      valid: false,
+      error:
+        'Para calcular el volumen de la olla se requieren `diameterCm` (> 0 cm) y `liquidHeightCm` (> 0 cm).',
+    };
+  }
+  const kettleHeightCm =
+    raw.kettleHeightCm !== undefined
+      ? sanitizePositiveNumber(raw.kettleHeightCm, 0, 800)
+      : undefined;
+  return {
+    valid: true,
+    data: { diameterCm, liquidHeightCm, kettleHeightCm },
+  };
+}
 
 /**
  * Valida y normaliza los argumentos de `query_inventory` antes de consultar el store.
@@ -599,7 +758,6 @@ export function executeScheduleBatch(rawArgs: Record<string, unknown>): ToolResu
 
   const state = useBreweryStore.getState();
 
-  // Buscar receta maestra coincidente si existe
   const normRecipe = normalizeText(recipeName);
   const matchedRecipe = state.masterRecipes.find(
     (r) =>
@@ -613,7 +771,6 @@ export function executeScheduleBatch(rawArgs: Record<string, unknown>): ToolResu
     state.settings.equipmentVolume ??
     250;
 
-  // Verificar fermentador si se indicó
   let targetFermenter: Fermenter | undefined;
   if (fermenterId) {
     const normFerm = normalizeText(fermenterId);
@@ -635,7 +792,6 @@ export function executeScheduleBatch(rawArgs: Record<string, unknown>): ToolResu
     }
   }
 
-  // Verificar disponibilidad de insumos si hay receta maestra asociada
   const stockShortfalls: { name: string; needed: number; available: number; unit: string }[] = [];
   const batchIngredients: BatchIngredient[] = [];
   let estimatedIngredientsCost = 0;
@@ -705,7 +861,7 @@ export function executeScheduleBatch(rawArgs: Record<string, unknown>): ToolResu
       sensoryProfiles: [],
       qualityLogs: [],
       notes: notes || `Cocción programada por IA para ${brewDate}`,
-      ingredientsDiscounted: false, // En estado PLANNED aún no descuenta stock físico hasta cocinar
+      ingredientsDiscounted: false,
     };
     state.addBatch(plannedBatch);
   }
@@ -822,7 +978,6 @@ export function executeUpdateFermenterTemperature(
       previousTemp = tempLogs[tempLogs.length - 1].temperature;
     }
 
-    // Evaluar salto térmico brusco o Cold Crash sin descanso de diacetilo
     if (previousTemp !== undefined) {
       const deltaT = targetTemperatureC - previousTemp;
       if (deltaT < -5 && targetTemperatureC > 4) {
@@ -910,7 +1065,6 @@ export function executeCalculateRecipeMetrics(
     styleName,
   } = validation.data;
 
-  // 1. Cálculo de OG y FG
   const totalGrainKg = fermentables.reduce((s, f) => s + f.weightKg, 0);
   const totalEffectivePoints = fermentables.reduce(
     (s, f) =>
@@ -931,10 +1085,8 @@ export function executeCalculateRecipeMetrics(
     ).toFixed(3)
   );
 
-  // 2. ABV y Grados Plato
   const abvMetrics = calculateABVAdvanced(estimatedOG, estimatedFG);
 
-  // 3. IBU Tinseth paso a paso + Geometría
   const hopInputs: HopAdditionInput[] = hops.map((h, i) => ({
     id: String(i + 1),
     name: h.name,
@@ -957,7 +1109,6 @@ export function executeCalculateRecipeMetrics(
     }
   );
 
-  // 4. Color Morey (SRM / EBC)
   const colorMetrics = calculateMoreyColor(
     fermentables.map((f) => ({
       name: f.name,
@@ -967,18 +1118,15 @@ export function executeCalculateRecipeMetrics(
     batchVolumeLiters
   );
 
-  // 5. Relación Amargor / Gravedad (BU:GU Ratio)
   const gravityUnits = Math.max(1, (estimatedOG - 1) * 1000);
   const buGuRatio = Number((ibuBreakdown.totalIBU / gravityUnits).toFixed(2));
 
-  // 6. Tasa de Inoculación (Pitching Rate)
   const pitchMetrics = calculatePitchingRate({
     batchVolumeL: batchVolumeLiters,
     og: estimatedOG,
     yeastType,
   });
 
-  // 7. Validación contra guía BJCP si se proporcionó styleName
   let bjcpEvaluation: Record<string, string> | undefined;
   if (styleName) {
     const styleKey = Object.keys(BJCP_STYLES).find(
@@ -1035,7 +1183,7 @@ export function executeCalculateRecipeMetrics(
 }
 
 // ============================================================================
-// 4. REGISTRO DE HERRAMIENTAS DE ESCRITURA Y DECLARACIONES PARA EL LLM
+// 4. REGISTRO DE HERRAMIENTAS DE LECTURA/ESCRITURA Y DECLARACIONES PARA EL LLM
 // ============================================================================
 
 /** Herramientas que modifican datos (se listan como "acciones ejecutadas" en el chat). */
@@ -1108,27 +1256,285 @@ const bool = (description: string): JsonSchemaProperty => ({
   description,
 });
 
+/** Herramientas de lectura y cálculo puro (no mutan IndexedDB). */
+export const READ_TOOLS = [
+  {
+    name: 'query_inventory',
+    description:
+      'Consulta y audita el inventario de insumos cerveceros con validación estricta. Permite filtrar por texto/lote, categoría (MALT, HOP, YEAST, ADJUNCT, CHEMICAL, PACKAGING), listar solo stock crítico y verificar si alcanza para una cantidad mínima.',
+    parameters: obj({
+      filter: str('(Opcional) Nombre parcial del insumo o número de lote'),
+      category: str('(Opcional) Categoría exacta del insumo', {
+        enum: VALID_CATEGORIES,
+      }),
+      onlyLowStock: bool(
+        '(Opcional) true para listar únicamente insumos agotados o con stock bajo (<= 5)'
+      ),
+      minStockRequired: numb(
+        '(Opcional) Cantidad mínima requerida para comprobar disponibilidad'
+      ),
+    }),
+  },
+  {
+    name: 'calculate_recipe_metrics',
+    description:
+      'Calcula todas las métricas de ingeniería de una receta: OG, FG, ABV (Hall/Lineal), IBU Tinseth exacto (con evaporación paso a paso y geometría de olla), Color Morey (SRM/EBC), relación BU:GU, tasa de inoculación de levadura y validación BJCP.',
+    parameters: obj(
+      {
+        batchVolumeLiters: numb('Volumen final en fermentador en litros (L)'),
+        boilVolumeLiters: numb('(Opcional) Volumen post-hervor en litros'),
+        efficiencyPercent: numb(
+          '(Opcional) Eficiencia del equipo en % (default: 75)'
+        ),
+        evaporationRateLPerHour: numb(
+          '(Opcional) Tasa de evaporación en L/h (default: 25)'
+        ),
+        kettleDiameterCm: numb(
+          '(Opcional) Diámetro de la olla de hervor en cm (default: 70)'
+        ),
+        fermentables: {
+          type: 'array',
+          description:
+            'Lista de maltas/granos con { name, weightKg, potentialPtsPerKg, lovibond }',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string', description: 'Nombre de la malta' },
+              weightKg: { type: 'number', description: 'Peso en kg' },
+              potentialPtsPerKg: {
+                type: 'number',
+                description: 'Potencial L°/kg (default 300)',
+              },
+              lovibond: {
+                type: 'number',
+                description: 'Color en °Lovibond (default 3)',
+              },
+            },
+            required: ['name', 'weightKg'],
+          },
+        },
+        hops: {
+          type: 'array',
+          description:
+            'Lista de adiciones de lúpulo con { name, weightGrams, alphaAcidsPercent, boilTimeMinutes, stage, form }',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string', description: 'Variedad de lúpulo' },
+              weightGrams: { type: 'number', description: 'Peso en gramos' },
+              alphaAcidsPercent: {
+                type: 'number',
+                description: '% de Alfa Ácidos',
+              },
+              boilTimeMinutes: {
+                type: 'number',
+                description: 'Minutos de hervor o contacto',
+              },
+              stage: {
+                type: 'string',
+                description: 'BOIL, FIRST_WORT, HOPSTAND o DRY_HOP',
+              },
+              form: {
+                type: 'string',
+                description: 'PELLET, WHOLE o PLUG',
+              },
+            },
+            required: ['weightGrams', 'alphaAcidsPercent', 'boilTimeMinutes'],
+          },
+        },
+        expectedAttenuationPercent: numb(
+          '(Opcional) Atenuación aparente esperada en % (default: 78)'
+        ),
+        yeastType: str(
+          '(Opcional) Tipo de levadura: ALE, LAGER, HYBRID, HIGH_GRAVITY_ALE, HIGH_GRAVITY_LAGER',
+          { enum: VALID_YEAST_STYLES }
+        ),
+        styleName: str(
+          '(Opcional) Nombre del estilo BJCP para validar rangos (ej: "American IPA")'
+        ),
+      },
+      ['batchVolumeLiters', 'fermentables']
+    ),
+  },
+  {
+    name: 'diagnose_fermentation',
+    description:
+      'Ejecuta un diagnóstico profundo de ingeniería sobre todos los lotes en fermentación/maduración buscando atenuación baja, perfiles térmicos anormales, riesgo de autólisis y riesgo de diacetilo (VDK / Hop Creep).',
+    parameters: obj({
+      lotCode: str('(Opcional) Filtrar por código de lote o receta específica'),
+    }),
+  },
+  ...calcToolDeclarations,
+  {
+    name: 'calculate_abv',
+    description:
+      'Calcula el porcentaje de alcohol por volumen (ABV lineal y Hall/ASBC) y la atenuación aparente/real a partir de la Densidad Original (OG) y Densidad Final (FG). Si falta OG o FG, preguntale primero al usuario.',
+    parameters: obj(
+      {
+        og: numb('Densidad Original (OG, ej: 1.050 o 1050)'),
+        fg: numb('Densidad Final (FG, ej: 1.010 o 1010)'),
+      },
+      ['og', 'fg']
+    ),
+  },
+  {
+    name: 'calculate_priming',
+    description:
+      'Calcula los gramos de azúcar de mesa y dextrosa necesarios para carbonatación natural en botella o barril (priming) considerando el CO2 residual térmico. Si faltan datos, preguntale primero al usuario.',
+    parameters: obj(
+      {
+        volumeLiters: numb('Volumen de cerveza a envasar en litros (L)'),
+        targetVolumes: numb('Volúmenes de CO2 deseados (ej: 2.5)'),
+        temperatureC: numb('Temperatura máxima alcanzada por la cerveza tras fermentar en °C (ej: 20)'),
+      },
+      ['volumeLiters', 'targetVolumes', 'temperatureC']
+    ),
+  },
+  {
+    name: 'calculate_ibu',
+    description:
+      'Calcula los IBUs (Tinseth) aportados por una adición de lúpulo.',
+    parameters: obj(
+      {
+        alphaAcids: numb('Porcentaje de ácidos alfa del lúpulo (ej: 5.5)'),
+        weightGrams: numb('Peso del lúpulo en gramos'),
+        volumeLiters: numb('Volumen del lote en litros'),
+        boilTimeMins: numb('Tiempo de hervor en minutos'),
+        gravity: numb('Gravedad del mosto durante el hervor (ej: 1.050)'),
+      },
+      ['alphaAcids', 'weightGrams', 'volumeLiters', 'boilTimeMins', 'gravity']
+    ),
+  },
+  {
+    name: 'calculate_srm',
+    description:
+      'Calcula el color de la cerveza en SRM usando la ecuación de Morey.',
+    parameters: obj(
+      {
+        mcu: numb(
+          'Malt Color Units: (Peso Lbs * Color Lovibond) / Volumen Galones'
+        ),
+      },
+      ['mcu']
+    ),
+  },
+  {
+    name: 'get_daily_briefing',
+    description:
+      'Resumen completo del día: agenda de hoy y atrasada, fermentadores y barriles sucios para CIP/limpieza, clientes deudores para llamar/cobrar, faltantes de stock crítico y cómo vienen los lotes en fermentación.',
+    parameters: obj(),
+  },
+  {
+    name: 'get_inventory_details',
+    description: 'Lista de insumos con stock, unidad, costo y lote.',
+    parameters: obj({
+      filter: str(
+        '(Opcional) Filtrar por nombre o tipo (MALT, HOP, YEAST, ADJUNCT, CHEMICAL, PACKAGING)'
+      ),
+    }),
+  },
+  {
+    name: 'get_active_batches',
+    description:
+      'Lotes activos (no agotados) con estado, fermentador asignado, días desde la cocción, densidades, volúmenes, costos y últimos registros de fermentación.',
+    parameters: obj(),
+  },
+  {
+    name: 'get_batch_details',
+    description:
+      'Detalle completo de UN lote (activo o histórico): ingredientes, fermentador, todos los registros de fermentación, controles de calidad y perfiles sensoriales.',
+    parameters: obj(
+      { lotCode: str('Código del lote o nombre de la receta') },
+      ['lotCode']
+    ),
+  },
+  {
+    name: 'get_batch_history',
+    description:
+      'Lotes terminados/históricos con ABV, costo por litro, puntaje sensorial promedio y defectos.',
+    parameters: obj({
+      limit: numb('Cantidad de lotes (default 10, máx 30)'),
+    }),
+  },
+  {
+    name: 'get_financial_report',
+    description:
+      'Reporte financiero de un mes: ingresos, gastos por categoría, ventas por tipo, ventas impagas, costos fijos configurados e historial de cierres.',
+    parameters: obj({
+      month: str('(Opcional) Mes en formato YYYY-MM. Default: mes actual'),
+    }),
+  },
+  {
+    name: 'get_fermenters_status',
+    description:
+      'Todos los fermentadores: estado (AVAILABLE, OCCUPIED, DIRTY, MAINTENANCE), capacidad en litros, lote actual que contiene y fecha de último CIP.',
+    parameters: obj(),
+  },
+  {
+    name: 'get_kegs_status',
+    description:
+      'Todos los barriles: estado (IN_HOUSE, WITH_CLIENT, DIRTY), ubicación, contenido, litros, si está pinchado y días con el cliente.',
+    parameters: obj(),
+  },
+  {
+    name: 'get_bottle_stock',
+    description:
+      'Stock de botellas/latas envasadas por estilo, formato y lote.',
+    parameters: obj(),
+  },
+  {
+    name: 'get_recipes',
+    description: 'Recetas maestras con ingredientes y parámetros objetivo.',
+    parameters: obj(),
+  },
+  {
+    name: 'get_customers',
+    description:
+      'Clientes (CRM) con contacto, dirección, deuda y ventas totales.',
+    parameters: obj({ filter: str('(Opcional) Filtrar por nombre') }),
+  },
+  {
+    name: 'get_customer_statement',
+    description:
+      'Cuenta corriente de un cliente: ventas, pagos, deuda y barriles que tiene.',
+    parameters: obj({ customer: str('Nombre del cliente') }, ['customer']),
+  },
+  {
+    name: 'get_calendar_events',
+    description:
+      'Eventos del calendario de producción y eventos atrasados.',
+    parameters: obj({
+      daysAhead: numb('Días hacia adelante (default 7)'),
+      daysBack: numb('Días hacia atrás (default 0)'),
+      includeCompleted: bool('Incluir eventos completados'),
+    }),
+  },
+  {
+    name: 'get_shopping_list',
+    description: 'Lista de compras actual.',
+    parameters: obj(),
+  },
+  {
+    name: 'generate_shopping_list',
+    description:
+      'Calcula qué insumos faltan para las cocciones agendadas en el calendario comparando recetas vs. inventario.',
+    parameters: obj({ daysAhead: numb('Días hacia adelante (ej: 30)') }, [
+      'daysAhead',
+    ]),
+  },
+  {
+    name: 'get_timers',
+    description: 'Timers activos y minutos restantes.',
+    parameters: obj(),
+  },
+];
+
 export const aiTools = [
   {
     functionDeclarations: [
-      // --------------- 4 HERRAMIENTAS TRONCALES REQUERIDAS ---------------
-      {
-        name: 'query_inventory',
-        description:
-          'Consulta y audita el inventario de insumos cerveceros con validación estricta. Permite filtrar por texto/lote, categoría (MALT, HOP, YEAST, ADJUNCT, CHEMICAL, PACKAGING), listar solo stock crítico y verificar si alcanza para una cantidad mínima.',
-        parameters: obj({
-          filter: str('(Opcional) Nombre parcial del insumo o número de lote'),
-          category: str('(Opcional) Categoría exacta del insumo', {
-            enum: VALID_CATEGORIES,
-          }),
-          onlyLowStock: bool(
-            '(Opcional) true para listar únicamente insumos agotados o con stock bajo (<= 5)'
-          ),
-          minStockRequired: numb(
-            '(Opcional) Cantidad mínima requerida para comprobar disponibilidad'
-          ),
-        }),
-      },
+      ...READ_TOOLS,
+
+      // ------------------------------ ESCRITURA OPERATIVA ------------------------------
       {
         name: 'schedule_batch',
         description:
@@ -1175,239 +1581,6 @@ export const aiTools = [
           ['fermenterId', 'targetTemperatureC']
         ),
       },
-      {
-        name: 'calculate_recipe_metrics',
-        description:
-          'Calcula todas las métricas de ingeniería de una receta: OG, FG, ABV (Hall/Lineal), IBU Tinseth exacto (con evaporación paso a paso y geometría de olla), Color Morey (SRM/EBC), relación BU:GU, tasa de inoculación de levadura y validación BJCP.',
-        parameters: obj(
-          {
-            batchVolumeLiters: numb('Volumen final en fermentador en litros (L)'),
-            boilVolumeLiters: numb('(Opcional) Volumen post-hervor en litros'),
-            efficiencyPercent: numb(
-              '(Opcional) Eficiencia del equipo en % (default: 75)'
-            ),
-            evaporationRateLPerHour: numb(
-              '(Opcional) Tasa de evaporación en L/h (default: 25)'
-            ),
-            kettleDiameterCm: numb(
-              '(Opcional) Diámetro de la olla de hervor en cm (default: 70)'
-            ),
-            fermentables: {
-              type: 'array',
-              description:
-                'Lista de maltas/granos con { name, weightKg, potentialPtsPerKg, lovibond }',
-              items: {
-                type: 'object',
-                properties: {
-                  name: { type: 'string', description: 'Nombre de la malta' },
-                  weightKg: { type: 'number', description: 'Peso en kg' },
-                  potentialPtsPerKg: {
-                    type: 'number',
-                    description: 'Potencial L°/kg (default 300)',
-                  },
-                  lovibond: {
-                    type: 'number',
-                    description: 'Color en °Lovibond (default 3)',
-                  },
-                },
-                required: ['name', 'weightKg'],
-              },
-            },
-            hops: {
-              type: 'array',
-              description:
-                'Lista de adiciones de lúpulo con { name, weightGrams, alphaAcidsPercent, boilTimeMinutes, stage, form }',
-              items: {
-                type: 'object',
-                properties: {
-                  name: { type: 'string', description: 'Variedad de lúpulo' },
-                  weightGrams: { type: 'number', description: 'Peso en gramos' },
-                  alphaAcidsPercent: {
-                    type: 'number',
-                    description: '% de Alfa Ácidos',
-                  },
-                  boilTimeMinutes: {
-                    type: 'number',
-                    description: 'Minutos de hervor o contacto',
-                  },
-                  stage: {
-                    type: 'string',
-                    description: 'BOIL, FIRST_WORT, HOPSTAND o DRY_HOP',
-                  },
-                  form: {
-                    type: 'string',
-                    description: 'PELLET, WHOLE o PLUG',
-                  },
-                },
-                required: ['weightGrams', 'alphaAcidsPercent', 'boilTimeMinutes'],
-              },
-            },
-            expectedAttenuationPercent: numb(
-              '(Opcional) Atenuación aparente esperada en % (default: 78)'
-            ),
-            yeastType: str(
-              '(Opcional) Tipo de levadura: ALE, LAGER, HYBRID, HIGH_GRAVITY_ALE, HIGH_GRAVITY_LAGER',
-              { enum: VALID_YEAST_STYLES }
-            ),
-            styleName: str(
-              '(Opcional) Nombre del estilo BJCP para validar rangos (ej: "American IPA")'
-            ),
-          },
-          ['batchVolumeLiters', 'fermentables']
-        ),
-      },
-      {
-        name: 'diagnose_fermentation',
-        description:
-          'Ejecuta un diagnóstico profundo de ingeniería sobre todos los lotes en fermentación/maduración buscando atenuación baja, perfiles térmicos anormales, riesgo de autólisis y riesgo de diacetilo (VDK / Hop Creep).',
-        parameters: obj({
-          lotCode: str('(Opcional) Filtrar por código de lote o receta específica'),
-        }),
-      },
-
-      // ------------------------------ CÁLCULOS CERVECEROS FORMALES ------------------------------
-      ...calcToolDeclarations,
-      {
-        name: 'calculate_ibu',
-        description:
-          'Calcula los IBUs (Tinseth) aportados por una adición de lúpulo.',
-        parameters: obj(
-          {
-            alphaAcids: numb('Porcentaje de ácidos alfa del lúpulo (ej: 5.5)'),
-            weightGrams: numb('Peso del lúpulo en gramos'),
-            volumeLiters: numb('Volumen del lote en litros'),
-            boilTimeMins: numb('Tiempo de hervor en minutos'),
-            gravity: numb('Gravedad del mosto durante el hervor (ej: 1.050)'),
-          },
-          ['alphaAcids', 'weightGrams', 'volumeLiters', 'boilTimeMins', 'gravity']
-        ),
-      },
-      {
-        name: 'calculate_srm',
-        description:
-          'Calcula el color de la cerveza en SRM usando la ecuación de Morey.',
-        parameters: obj(
-          {
-            mcu: numb(
-              'Malt Color Units: (Peso Lbs * Color Lovibond) / Volumen Galones'
-            ),
-          },
-          ['mcu']
-        ),
-      },
-
-      // ------------------------------ LECTURA OPERATIVA ------------------------------
-      {
-        name: 'get_daily_briefing',
-        description:
-          'Resumen completo del día: agenda de hoy y atrasada, fermentadores y barriles sucios para CIP/limpieza, clientes deudores para llamar/cobrar, faltantes de stock crítico y cómo vienen los lotes en fermentación.',
-        parameters: obj(),
-      },
-      {
-        name: 'get_inventory_details',
-        description: 'Lista de insumos con stock, unidad, costo y lote.',
-        parameters: obj({
-          filter: str(
-            '(Opcional) Filtrar por nombre o tipo (MALT, HOP, YEAST, ADJUNCT, CHEMICAL, PACKAGING)'
-          ),
-        }),
-      },
-      {
-        name: 'get_active_batches',
-        description:
-          'Lotes activos (no agotados) con estado, fermentador asignado, días desde la cocción, densidades, volúmenes, costos y últimos registros de fermentación.',
-        parameters: obj(),
-      },
-      {
-        name: 'get_batch_details',
-        description:
-          'Detalle completo de UN lote (activo o histórico): ingredientes, fermentador, todos los registros de fermentación, controles de calidad y perfiles sensoriales.',
-        parameters: obj(
-          { lotCode: str('Código del lote o nombre de la receta') },
-          ['lotCode']
-        ),
-      },
-      {
-        name: 'get_batch_history',
-        description:
-          'Lotes terminados/históricos con ABV, costo por litro, puntaje sensorial promedio y defectos.',
-        parameters: obj({
-          limit: numb('Cantidad de lotes (default 10, máx 30)'),
-        }),
-      },
-      {
-        name: 'get_financial_report',
-        description:
-          'Reporte financiero de un mes: ingresos, gastos por categoría, ventas por tipo, ventas impagas, costos fijos configurados e historial de cierres.',
-        parameters: obj({
-          month: str('(Opcional) Mes en formato YYYY-MM. Default: mes actual'),
-        }),
-      },
-      {
-        name: 'get_fermenters_status',
-        description:
-          'Todos los fermentadores: estado (AVAILABLE, OCCUPIED, DIRTY, MAINTENANCE), capacidad en litros, lote actual que contiene y fecha de último CIP.',
-        parameters: obj(),
-      },
-      {
-        name: 'get_kegs_status',
-        description:
-          'Todos los barriles: estado (IN_HOUSE, WITH_CLIENT, DIRTY), ubicación, contenido, litros, si está pinchado y días con el cliente.',
-        parameters: obj(),
-      },
-      {
-        name: 'get_bottle_stock',
-        description:
-          'Stock de botellas/latas envasadas por estilo, formato y lote.',
-        parameters: obj(),
-      },
-      {
-        name: 'get_recipes',
-        description: 'Recetas maestras con ingredientes y parámetros objetivo.',
-        parameters: obj(),
-      },
-      {
-        name: 'get_customers',
-        description:
-          'Clientes (CRM) con contacto, dirección, deuda y ventas totales.',
-        parameters: obj({ filter: str('(Opcional) Filtrar por nombre') }),
-      },
-      {
-        name: 'get_customer_statement',
-        description:
-          'Cuenta corriente de un cliente: ventas, pagos, deuda y barriles que tiene.',
-        parameters: obj({ customer: str('Nombre del cliente') }, ['customer']),
-      },
-      {
-        name: 'get_calendar_events',
-        description:
-          'Eventos del calendario de producción y eventos atrasados.',
-        parameters: obj({
-          daysAhead: numb('Días hacia adelante (default 7)'),
-          daysBack: numb('Días hacia atrás (default 0)'),
-          includeCompleted: bool('Incluir eventos completados'),
-        }),
-      },
-      {
-        name: 'get_shopping_list',
-        description: 'Lista de compras actual.',
-        parameters: obj(),
-      },
-      {
-        name: 'generate_shopping_list',
-        description:
-          'Calcula qué insumos faltan para las cocciones agendadas en el calendario comparando recetas vs. inventario.',
-        parameters: obj({ daysAhead: numb('Días hacia adelante (ej: 30)') }, [
-          'daysAhead',
-        ]),
-      },
-      {
-        name: 'get_timers',
-        description: 'Timers activos y minutos restantes.',
-        parameters: obj(),
-      },
-
-      // ------------------------------ ESCRITURA OPERATIVA ------------------------------
       {
         name: 'clean_fermenter',
         description:
@@ -1828,12 +2001,12 @@ export const aiTools = [
 ];
 
 // ============================================================================
-// 5. MAPA DE HANDLERS Y DESPACHADOR SEGURO (executeTool)
+// 5. MAPA DE HANDLERS Y DESPACHADOR SEGURO (toolExecutors / executeTool)
 // ============================================================================
 
-type ToolHandler = (args: Record<string, unknown>) => ToolResult;
+export type ToolHandler = (args: Record<string, unknown>) => ToolResult;
 
-const HANDLERS: Record<string, ToolHandler> = {
+export const toolExecutors: Record<string, ToolHandler> = {
   // 4 Herramientas principales con tipado y validación estricta
   query_inventory: (args) => executeQueryInventory(args),
   schedule_batch: (args) => executeScheduleBatch(args),
@@ -1877,18 +2050,43 @@ const HANDLERS: Record<string, ToolHandler> = {
     const boilTimeMins = sanitizePositiveNumber(raw.boilTimeMins, 0, 240);
     const gravity = sanitizeGravity(raw.gravity, 1.05);
     if (volumeLiters <= 0 || weightGrams <= 0 || alphaAcids <= 0) {
-      return { error: 'Parámetros inválidos: volumeLiters, weightGrams y alphaAcids deben ser > 0.' };
+      return {
+        error: 'Parámetros inválidos: volumeLiters, weightGrams y alphaAcids deben ser > 0.',
+        needsUserInput: true,
+      };
     }
     const res = calculateTinsethIBUBreakdown(
       [{ amount: weightGrams, alpha: alphaAcids, time: boilTimeMins, type: 'BOIL' }],
       volumeLiters,
       gravity
     );
-    return { ibu: Number(res.totalIBU.toFixed(2)) };
+    const ibu = Number(res.totalIBU.toFixed(1));
+    return {
+      success: true,
+      ibu,
+      summary: `Aporte de amargor: ${ibu} IBU (${weightGrams} g al ${alphaAcids}% AA por ${boilTimeMins} min en ${volumeLiters} L a SG ${gravity.toFixed(3)}).`,
+      spokenSummary: `Esa adición aporta aproximadamente ${ibu.toLocaleString('es-AR')} I B U.`,
+      calculatorLinks: [{ type: 'IBU', params: { volumeL: volumeLiters, gravity } }],
+    };
   },
   calculate_srm: (raw) => {
     const mcu = sanitizePositiveNumber(raw.mcu, 0, 5000);
-    return { srm: Number((1.4922 * Math.pow(mcu, 0.6859)).toFixed(2)) };
+    if (mcu <= 0) {
+      return {
+        error: 'Se requiere un valor de MCU mayor a 0 para calcular el color SRM.',
+        needsUserInput: true,
+      };
+    }
+    const srm = Number((1.4922 * Math.pow(mcu, 0.6859)).toFixed(1));
+    const ebc = Number((srm * 1.97).toFixed(1));
+    return {
+      success: true,
+      srm,
+      ebc,
+      summary: `Color estimado: ${srm} SRM (${ebc} EBC) para ${mcu} MCU.`,
+      spokenSummary: `El color estimado es de ${srm.toLocaleString('es-AR')} S R M, equivalente a ${ebc.toLocaleString('es-AR')} E B C.`,
+      calculatorLinks: [{ type: 'COLOR', params: {} }],
+    };
   },
 
   // Lectura y escritura delegada a aiActions
@@ -2056,6 +2254,8 @@ const HANDLERS: Record<string, ToolHandler> = {
   set_timer: (a) => aiActions.setTimer(a as { minutes: number; label?: string }),
   cancel_timer: (a) => aiActions.cancelTimer(a as { label?: string }),
 };
+
+const HANDLERS = toolExecutors;
 
 /**
  * Valida que los argumentos crudos sean un objeto seguro y ejecuta la herramienta solicitada.

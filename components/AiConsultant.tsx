@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Send, Bot, Loader2, AlertCircle, Trash2, Sparkles, Calculator as CalcIcon, ExternalLink } from 'lucide-react';
 import { analyzeBrewingData } from '../services/geminiService';
@@ -79,7 +78,7 @@ const processInline = (text: string): React.ReactNode[] => {
 };
 
 const AI_CHAT_DB_KEY = 'brewmaster_ai_chat';
-const defaultMessages: {role: 'user' | 'ai', content: string}[] = [{ role: 'ai', content: '¡Hola! Soy BrewMaster AI. Tengo acceso a **toda tu planta**: producción, inventario, finanzas, clientes, calendario, barriles, botellas y sesiones de cocción. ¿En qué te ayudo hoy?' }];
+const defaultMessages: {role: 'user' | 'ai', content: string}[] = [{ role: 'ai', content: '¡Hola! Soy BrewMaster AI. Tengo acceso a **toda tu planta y calculadoras de ingeniería**: volumen de olla, empaste/lavado, carbonatación en PSI, alcohol, refractómetro, producción, inventario y finanzas. ¿En qué te ayudo hoy?' }];
 
 // Singleton DB connection to avoid opening/closing on every save
 let chatDbPromise: Promise<IDBDatabase> | null = null;
@@ -97,9 +96,12 @@ const getChatDb = (): Promise<IDBDatabase> => {
   return chatDbPromise;
 };
 
-// Quick action categories
+// Quick action categories (incluye accesos rápidos a cálculos de planta con slot-filling)
 const QUICK_ACTIONS = [
   { label: '📋 ¿Qué tengo para hacer hoy?', prompt: '¿Qué tengo para hacer hoy? Revisá la agenda de hoy y tareas pendientes, fermentadores y barriles sucios para limpiar con CIP, clientes con deuda para cobrarles, stock crítico y el estado de los lotes en producción.' },
+  { label: '📐 Volumen de olla', prompt: 'Quiero saber cuántos litros tengo en la olla.' },
+  { label: '🌡️ Agua de empaste (Strike)', prompt: 'Necesito calcular la temperatura del agua de empaste para macerar.' },
+  { label: '🫧 Carbonatación (PSI)', prompt: 'Calculame los PSI de CO2 para carbonatar un barril.' },
   { label: '🛢️ Fermentadores', prompt: '¿Cuál es el estado de todos mis fermentadores? Decime cuáles están ocupados (con qué lote, días y gravedad), cuáles sucios para CIP y cuáles disponibles.' },
   { label: '📊 Resumen de planta', prompt: 'Dame un resumen ejecutivo del estado actual de la planta: lotes activos, fermentadores, inventario bajo, barriles sucios, próximos eventos y deudas pendientes.' },
   { label: '💰 Finanzas del mes', prompt: '¿Cuánto vendí este mes, cuáles son mis gastos y cuál es mi margen? ¿Algún cliente me debe plata?' },
@@ -120,21 +122,10 @@ export const AiConsultant: React.FC = () => {
   const settings = useBreweryStore(s => s.settings);
   const masterRecipes = useBreweryStore(s => s.masterRecipes);
   const updateSettings = useBreweryStore(s => s.updateSettings);
-  const updateKegStatus = useBreweryStore(s => s.updateKegStatus);
-  const updateInventory = useBreweryStore(s => s.updateInventory);
-  const updateBatch = useBreweryStore(s => s.updateBatch);
-  const addSale = useBreweryStore(s => s.addSale);
-  const addPayment = useBreweryStore(s => s.addPayment);
-  const addExpense = useBreweryStore(s => s.addExpense);
-  const addCustomer = useBreweryStore(s => s.addCustomer);
-  const updateCustomer = useBreweryStore(s => s.updateCustomer);
   const sales = useBreweryStore(s => s.sales);
   const expenses = useBreweryStore(s => s.expenses);
   const customers = useBreweryStore(s => s.customers);
   const calendarEvents = useBreweryStore(s => s.calendarEvents);
-  const brewSessions = useBreweryStore(s => s.brewSessions);
-  const financialHistory = useBreweryStore(s => s.financialHistory);
-  const payments = useBreweryStore(s => s.payments);
 
   const [input, setInput] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -187,40 +178,6 @@ export const AiConsultant: React.FC = () => {
   }, [messages]);
 
   const [isLoading, setIsLoading] = useState(false);
-
-  // Build lightweight summary payload (RAG will fetch details if needed)
-  const appDataPayload = useMemo(() => {
-    const now = new Date();
-    const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    const sections: string[] = [];
-
-    // Context instructions for the AI
-    sections.push("INFO: Tienes acceso a herramientas (Tools) para obtener detalles completos de Recetas, Lotes Activos, Inventario, Barriles y Finanzas. Usa las herramientas si necesitas más información que este resumen general.");
-
-    const activeBatches = batches.filter(b => b.status !== BatchStatus.COMPLETED);
-    sections.push(`Lotes activos: ${activeBatches.length}`);
-    activeBatches.forEach(b => sections.push(`- ${b.recipeName} (${b.status}) [Código: ${b.lotCode}]`));
-
-    const lowStock = inventory.filter(i => i.stockAmount <= 0);
-    if (lowStock.length > 0) {
-      sections.push(`Sin stock: ${lowStock.map(i => i.name).join(', ')}`);
-    }
-
-    const dirtyKegs = kegs.filter(k => k.status === 'DIRTY');
-    sections.push(`Barriles sucios: ${dirtyKegs.length} (${dirtyKegs.map(k => k.id).join(', ')})`);
-
-    const debtors = customers.filter(c => c.debt > 0);
-    if (debtors.length > 0) {
-      const totalDebt = debtors.reduce((sum, c) => sum + c.debt, 0);
-      sections.push(`Deuda total de clientes: $${totalDebt.toFixed(0)} (${debtors.length} clientes con deuda)`);
-    }
-
-    const currentMonthSales = sales.filter(s => s.date.startsWith(currentMonthKey)).reduce((sum, s) => sum + s.amount, 0);
-    const currentMonthExpenses = expenses.filter(e => e.date.startsWith(currentMonthKey)).reduce((sum, e) => sum + e.amount, 0);
-    sections.push(`Mes actual (${currentMonthKey}) -> Ventas: $${currentMonthSales.toFixed(0)} | Gastos: $${currentMonthExpenses.toFixed(0)}`);
-
-    return sections.join('\n');
-  }, [batches, inventory, kegs, customers, sales, expenses]);
 
   const handleSend = async (explicitMsg?: string) => {
     const textToUse = typeof explicitMsg === 'string' ? explicitMsg : input;
@@ -276,7 +233,7 @@ export const AiConsultant: React.FC = () => {
                 <Bot className="text-copper" />
                 BrewMaster AI
             </h2>
-            <p className="text-sm text-zinc-500 dark:text-zinc-400">Consultor integral de planta by Gemini</p>
+            <p className="text-sm text-zinc-500 dark:text-zinc-400">Consultor integral de planta e ingeniería cervecera</p>
           </div>
           <div className="flex items-center gap-3">
             <button 
@@ -288,7 +245,7 @@ export const AiConsultant: React.FC = () => {
             </button>
             <div className={`text-xs px-3 py-1.5 rounded-full border flex items-center gap-2 ${settings.apiKey ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 border-green-200 dark:border-green-800/50' : 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 border-amber-200 dark:border-amber-800/50'}`}>
                <AlertCircle size={12} />
-               <span>{settings.apiKey ? 'Conectado' : 'Modo Demo (Sin Key)'}</span>
+               <span>{settings.apiKey ? 'Conectado' : 'Modo Local Offline / Demo'}</span>
             </div>
           </div>
       </div>
@@ -296,9 +253,21 @@ export const AiConsultant: React.FC = () => {
       <div className="flex-1 bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-700 overflow-hidden flex flex-col">
         <div className="flex-1 overflow-y-auto p-6 space-y-4 bg-zinc-50/50 dark:bg-zinc-950/50">
           {messages.map((msg, idx) => {
+            // Extrae bloques [ABRIR_CALCULADORA: { type: '...', params: { ... } }] para renderizar Action Cards interactivas
             const { cleanText, links } = msg.role === 'ai' 
               ? extractCalculatorLinks(msg.content)
               : { cleanText: msg.content, links: [] };
+
+            // Filtrar duplicados de alias visuales en los chips de parámetros
+            const getDisplayEntries = (params: Record<string, number | string>) => {
+              const seenLabels = new Set<string>();
+              return Object.entries(params).filter(([k]) => {
+                const label = PARAM_LABELS[k] || k;
+                if (seenLabels.has(label)) return false;
+                seenLabels.add(label);
+                return true;
+              });
+            };
 
             return (
               <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
@@ -319,7 +288,7 @@ export const AiConsultant: React.FC = () => {
                     <div className="mt-3 pt-3 border-t border-zinc-100 dark:border-zinc-800 space-y-2">
                       {links.map((link, lIdx) => {
                         const label = CALCULATOR_LABELS[link.type] || link.type;
-                        const entries = Object.entries(link.params || {});
+                        const entries = getDisplayEntries(link.params || {});
                         return (
                           <div 
                             key={lIdx}
@@ -328,7 +297,7 @@ export const AiConsultant: React.FC = () => {
                             <div className="min-w-0">
                               <div className="flex items-center gap-2 text-xs font-bold text-zinc-900 dark:text-white">
                                 <CalcIcon size={14} className="text-copper shrink-0" />
-                                <span>{label}</span>
+                                <span>Calculadora: {label}</span>
                               </div>
                               {entries.length > 0 && (
                                 <div className="flex flex-wrap gap-1.5 mt-1.5">
@@ -365,7 +334,7 @@ export const AiConsultant: React.FC = () => {
              <div className="flex justify-start">
                 <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 p-4 rounded-3xl rounded-bl-sm shadow-sm flex items-center gap-3 text-zinc-500 dark:text-zinc-400 text-sm">
                     <Loader2 className="animate-spin text-copper" size={16} />
-                    <span>Analizando toda la planta...</span>
+                    <span>Calculando y analizando planta...</span>
                 </div>
              </div>
           )}
@@ -380,7 +349,7 @@ export const AiConsultant: React.FC = () => {
                 key={idx}
                 onClick={() => handleSend(action.prompt)} 
                 disabled={isLoading}
-                className="text-[11px] whitespace-nowrap bg-zinc-50 dark:bg-zinc-700 hover:bg-copper/10 dark:hover:bg-copper/20 hover:border-copper/30 text-zinc-700 dark:text-zinc-300 px-3 py-1.5 rounded-full transition-colors border border-zinc-200 dark:border-zinc-600 disabled:opacity-50 shrink-0"
+                className="text-[11px] whitespace-nowrap bg-zinc-50 dark:bg-zinc-700 hover:bg-copper/10 dark:hover:bg-copper/20 hover:border-copper/30 text-zinc-700 dark:text-zinc-300 px-3 py-1.5 rounded-full transition-colors border border-zinc-200 dark:border-zinc-600 disabled:opacity-50 shrink-0 cursor-pointer"
               >
                 {action.label}
               </button>
@@ -393,13 +362,13 @@ export const AiConsultant: React.FC = () => {
               value={input || ''}
               onDebouncedChange={setInput}
               onEnter={(val) => handleSend(val)}
-              placeholder="Preguntame lo que necesites sobre tu planta..."
+              placeholder="Preguntame un cálculo (ej: volumen de olla 35x58) o estado de tu planta..."
               className="flex-1 border border-zinc-300 dark:border-zinc-600 rounded-xl px-4 py-2.5 focus:ring-2 focus:ring-copper outline-none bg-white dark:bg-zinc-950 text-zinc-950 dark:text-zinc-100"
             />
             <button 
                 onClick={() => handleSend()}
                 disabled={isLoading}
-                className="bg-copper hover:bg-copper-dark text-white p-2.5 rounded-xl disabled:opacity-50 transition shadow-sm"
+                className="bg-copper hover:bg-copper-dark text-white p-2.5 rounded-xl disabled:opacity-50 transition shadow-sm cursor-pointer"
             >
               <Send size={20} />
             </button>

@@ -3,13 +3,13 @@
  * las funciones puras de `lib/brewmath.ts` al agente BON (Gemini / OpenAI IPC / motor offline).
  *
  * Cada herramienta:
- * 1. Valida y sanitiza estrictamente los argumentos (`ArgReader`). Si faltan parámetros obligatorios
- *    NO inventa valores: devuelve `{ error, needsUserInput: true, missingParameters, askUser }` para
- *    que el modelo pregunte exactamente los datos faltantes (slot-filling).
+ * 1. Valida y sanitiza estrictamente los argumentos (`ArgReader` + `sanitizePositiveNumber`). Si faltan
+ *    parámetros obligatorios NO inventa valores: devuelve `{ error, needsUserInput: true, missingParameters, askUser }`
+ *    para que el modelo pregunte exactamente los datos faltantes (slot-filling).
  * 2. Ejecuta la función de `lib/brewmath.ts` correspondiente.
  * 3. Devuelve resultados redondeados + `summary` (texto técnico legible) + `spokenSummary`
  *    (frase natural para TTS) + `calculatorLinks` (deep link a la calculadora visual con valores
- *    precargados; se elimina antes de reenviar el resultado al LLM).
+ *    precargados).
  */
 
 import {
@@ -29,11 +29,12 @@ import {
   AcidType,
   sanitizeGravity,
   sanitizeNumber,
+  sanitizePositiveNumber,
   sgToPlato,
   YeastPitchStyle,
 } from '../../lib/brewmath';
 import type { ToolResult } from './actions';
-import type { CalculatorDeepLink } from './calculatorBridge';
+import { CalculatorDeepLink, serializeCalculatorTag } from './calculatorBridge';
 import { normalizeTranscript } from './voiceText';
 
 // ============================================================================
@@ -102,12 +103,14 @@ class ArgReader {
       this.missing.push(rule.label);
       return NaN;
     }
-    const parsed = sanitizeNumber(rawVal, {
-      fallback: NaN,
-      allowNegative: rule.allowNegative ?? false,
-      min: -Infinity,
-      max: Infinity,
-    });
+    const parsed = rule.allowNegative
+      ? sanitizeNumber(rawVal, {
+          fallback: NaN,
+          allowNegative: true,
+          min: -Infinity,
+          max: Infinity,
+        })
+      : sanitizePositiveNumber(rawVal, NaN, Infinity);
     if (!Number.isFinite(parsed)) {
       this.errors.push(`${rule.label}: valor no numérico ("${String(rawVal)}").`);
       return NaN;
@@ -310,7 +313,6 @@ export function executeStrikeWater(raw: Raw): ToolResult {
 
   const strikeTempC = calculateStrikeTemp(ratio, targetMashTempC, grainTempC, thermalLossC);
   const mashWaterL = grainWeightKg * ratio;
-  // Desplazamiento aproximado del grano seco: ~0.67 L/kg
   const totalMashVolumeL = mashWaterL + grainWeightKg * 0.67;
 
   return {
@@ -351,7 +353,7 @@ export function executeSpargeWater(raw: Raw): ToolResult {
     label: 'relación agua/grano (L/kg)',
     min: 1.5,
     max: 8,
-    aliases: ['mashRatio'],
+    aliases: ['mashRatio', 'waterToGrainRatio'],
     defaultValue: 3,
     assumption: 'Relación de empaste asumida: 3 L/kg.',
   });
@@ -595,7 +597,6 @@ export function executePitchRateAndStarter(raw: Raw): ToolResult {
   const fail = a.failure('calcular la tasa de inoculación');
   if (fail) return fail;
 
-  // Viabilidad: explícita, por fecha de fabricación (~0.7 %/día, Mr Malty) o 100 %
   let viabilityPercent = 100;
   let ageDays: number | undefined;
   const manufactureDate = a.str('manufactureDate');
@@ -638,8 +639,11 @@ export function executePitchRateAndStarter(raw: Raw): ToolResult {
   const links: CalculatorDeepLink[] = [
     link('PITCH', {
       volumeL,
+      batchVolumeL: volumeL,
       targetOG,
+      og: targetOG,
       yeastType,
+      pitchStyle: yeastType,
       cellsPerPackBillions,
       viabilityPercent: r(viabilityPercent, 0),
     }),
@@ -652,7 +656,7 @@ export function executePitchRateAndStarter(raw: Raw): ToolResult {
     const deficit = pitch.totalCellsBillions - availableCells;
     if (deficit > 0) {
       const starterGravity = 1.036;
-      const growthPerLiter = 10 * sgToPlato(starterGravity) * 1.4; // Braukaiser (agitador)
+      const growthPerLiter = 10 * sgToPlato(starterGravity) * 1.4;
       const starterL = Math.ceil((deficit / growthPerLiter) * 2) / 2;
       const starter = calculateYeastStarter(starterL, starterGravity, availableCells);
       result.starter = {
@@ -1066,8 +1070,6 @@ export const calcToolHandlers: Record<string, (args: Raw) => ToolResult> = {
 /** Nombres de todas las herramientas de cálculo (útil para detectar deep links). */
 export const CALC_TOOL_NAMES = new Set(Object.keys(calcToolHandlers));
 
-import { serializeCalculatorTag } from './calculatorBridge';
-
 /**
  * Parser determinista para resolver consultas de cálculo comunes en modo local offline
  * (sin conexión a internet o cuota de API agotada).
@@ -1105,7 +1107,7 @@ export function tryOfflineCalculation(userQuery: string, isVoiceMode: boolean = 
     if (diameter !== undefined && height !== undefined) {
       const res = executeKettleVolume({ diameterCm: diameter, liquidHeightCm: height });
       if (res.success) {
-        if (isVoiceMode) return res.spokenSummary as string;
+        if (isVoiceMode) return `${res.spokenSummary as string} (Calculado con motor local offline)`;
         const linkTag = res.calculatorLinks?.[0] ? `\n\n${serializeCalculatorTag(res.calculatorLinks[0])}` : '';
         return `**${res.summary}**\n\n*(Calculado con motor local offline)*${linkTag}`;
       }
@@ -1127,7 +1129,7 @@ export function tryOfflineCalculation(userQuery: string, isVoiceMode: boolean = 
     if (temp !== undefined && vols !== undefined) {
       const res = executeCarbonation({ beerTempC: temp, targetCO2Volumes: vols });
       if (res.success) {
-        if (isVoiceMode) return res.spokenSummary as string;
+        if (isVoiceMode) return `${res.spokenSummary as string} (Calculado con motor local offline)`;
         const linkTag = res.calculatorLinks?.[0] ? `\n\n${serializeCalculatorTag(res.calculatorLinks[0])}` : '';
         return `**${res.summary}**\n\n*(Calculado con motor local offline)*${linkTag}`;
       }
@@ -1159,7 +1161,7 @@ export function tryOfflineCalculation(userQuery: string, isVoiceMode: boolean = 
     if (og && fg && og > fg) {
       const res = executeAbv({ og, fg });
       if (res.success) {
-        if (isVoiceMode) return res.spokenSummary as string;
+        if (isVoiceMode) return `${res.spokenSummary as string} (Calculado con motor local offline)`;
         const linkTag = res.calculatorLinks?.[0] ? `\n\n${serializeCalculatorTag(res.calculatorLinks[0])}` : '';
         return `**${res.summary}**\n\n*(Calculado con motor local offline)*${linkTag}`;
       }
@@ -1181,7 +1183,7 @@ export function tryOfflineCalculation(userQuery: string, isVoiceMode: boolean = 
     if (grain !== undefined && mashTemp !== undefined) {
       const res = executeStrikeWater({ grainWeightKg: grain, targetMashTempC: mashTemp });
       if (res.success) {
-        if (isVoiceMode) return res.spokenSummary as string;
+        if (isVoiceMode) return `${res.spokenSummary as string} (Calculado con motor local offline)`;
         const linkTag = res.calculatorLinks?.[0] ? `\n\n${serializeCalculatorTag(res.calculatorLinks[0])}` : '';
         return `**${res.summary}**\n\n*(Calculado con motor local offline)*${linkTag}`;
       }
@@ -1200,7 +1202,7 @@ export function tryOfflineCalculation(userQuery: string, isVoiceMode: boolean = 
     if (kettle !== undefined && grain !== undefined) {
       const res = executeSpargeWater({ preBoilVolumeL: kettle, grainWeightKg: grain });
       if (res.success) {
-        if (isVoiceMode) return res.spokenSummary as string;
+        if (isVoiceMode) return `${res.spokenSummary as string} (Calculado con motor local offline)`;
         const linkTag = res.calculatorLinks?.[0] ? `\n\n${serializeCalculatorTag(res.calculatorLinks[0])}` : '';
         return `**${res.summary}**\n\n*(Calculado con motor local offline)*${linkTag}`;
       }
@@ -1209,7 +1211,7 @@ export function tryOfflineCalculation(userQuery: string, isVoiceMode: boolean = 
   }
 
   // 6. CORRECCIÓN DE REFRACTÓMETRO
-  if (/refractometro|refractometro|brix/.test(q)) {
+  if (/refractometro|brix/.test(q)) {
     const brixVals = Array.from(q.matchAll(/(\d+(?:[.,]\d+)?)\s*(?:brix|°\s*bx|bx)/g)).map((m) =>
       Number(m[1].replace(',', '.'))
     );
@@ -1217,7 +1219,7 @@ export function tryOfflineCalculation(userQuery: string, isVoiceMode: boolean = 
       const sorted = [...brixVals].sort((a, b) => b - a);
       const res = executeRefractometerCorrection({ originalBrix: sorted[0], currentBrix: sorted[1] });
       if (res.success) {
-        if (isVoiceMode) return res.spokenSummary as string;
+        if (isVoiceMode) return `${res.spokenSummary as string} (Calculado con motor local offline)`;
         const linkTag = res.calculatorLinks?.[0] ? `\n\n${serializeCalculatorTag(res.calculatorLinks[0])}` : '';
         return `**${res.summary}**\n\n*(Calculado con motor local offline)*${linkTag}`;
       }
@@ -1226,13 +1228,13 @@ export function tryOfflineCalculation(userQuery: string, isVoiceMode: boolean = 
   }
 
   // 7. CORRECCIÓN DE DENSÍMETRO POR TEMPERATURA
-  if (/densimetro|densimetro|corregir.*densidad/.test(q)) {
+  if (/densimetro|hidrometro|corregir.*densidad/.test(q)) {
     const grav = numExtractor([/\b(1[.,]\d{3}|\d{4})\b/]);
     const temp = numExtractor([/(\d+(?:[.,]\d+)?)\s*(?:°\s*c|grados)/]);
     if (grav !== undefined && temp !== undefined) {
       const res = executeHydrometerTempCorrection({ measuredGravity: grav, measuredTempC: temp });
       if (res.success) {
-        if (isVoiceMode) return res.spokenSummary as string;
+        if (isVoiceMode) return `${res.spokenSummary as string} (Calculado con motor local offline)`;
         const linkTag = res.calculatorLinks?.[0] ? `\n\n${serializeCalculatorTag(res.calculatorLinks[0])}` : '';
         return `**${res.summary}**\n\n*(Calculado con motor local offline)*${linkTag}`;
       }
@@ -1240,6 +1242,45 @@ export function tryOfflineCalculation(userQuery: string, isVoiceMode: boolean = 
     return 'Para corregir la lectura del densímetro necesito la densidad observada y la temperatura de la muestra en °C. ¿Qué valores mediste?';
   }
 
+  // 8. ÁCIDO / AJUSTE DE PH
+  if (/acido|alcalinidad|\bph\b.*macerado|macerado.*\bph\b/.test(q)) {
+    const vol = numExtractor([/(\d+(?:[.,]\d+)?)\s*(?:l|litros)/]);
+    const alk = numExtractor([/(\d+(?:[.,]\d+)?)\s*ppm/, /alcalinidad\D*(\d+(?:[.,]\d+)?)/]);
+    if (vol !== undefined && alk !== undefined) {
+      const acidType: AcidType = q.includes('fosforico')
+        ? 'PHOSPHORIC'
+        : q.includes('citrico')
+        ? 'CITRIC'
+        : 'LACTIC';
+      const res = executeAcidAddition({ waterVolumeL: vol, alkalinityPpm: alk, acidType });
+      if (res.success) {
+        if (isVoiceMode) return `${res.spokenSummary as string} (Calculado con motor local offline)`;
+        const linkTag = res.calculatorLinks?.[0] ? `\n\n${serializeCalculatorTag(res.calculatorLinks[0])}` : '';
+        return `**${res.summary}**\n\n*(Calculado con motor local offline)*${linkTag}`;
+      }
+    }
+    return 'Para calcular la dosis de ácido necesito el volumen de agua a tratar en litros y la alcalinidad en ppm como CaCO3. ¿Qué datos tenés?';
+  }
+
+  // 9. TASA DE INOCULACIÓN / LEVADURA / STARTER
+  if (/inoculacion|starter|levadura.*celulas|cuanta.*levadura/.test(q)) {
+    const vol = numExtractor([/(\d+(?:[.,]\d+)?)\s*(?:l|litros)/]);
+    const grav = numExtractor([/\b(1[.,]\d{3}|\d{4})\b/]);
+    if (vol !== undefined && grav !== undefined) {
+      const yeastType: YeastPitchStyle = q.includes('lager')
+        ? 'LAGER'
+        : q.includes('hibrid') || q.includes('kolsch')
+        ? 'HYBRID'
+        : 'ALE';
+      const res = executePitchRateAndStarter({ volumeL: vol, targetOG: grav, yeastType });
+      if (res.success) {
+        if (isVoiceMode) return `${res.spokenSummary as string} (Calculado con motor local offline)`;
+        const linkTag = res.calculatorLinks?.[0] ? `\n\n${serializeCalculatorTag(res.calculatorLinks[0])}` : '';
+        return `**${res.summary}**\n\n*(Calculado con motor local offline)*${linkTag}`;
+      }
+    }
+    return 'Para calcular la tasa de inoculación y el starter necesito el volumen del lote en litros y la Densidad Original (OG). ¿Qué valores tenés?';
+  }
+
   return null;
 }
-

@@ -6,7 +6,8 @@
  *   "uno punto cero cinco cero" → "1.050", "mil cincuenta" → "1.050" en contexto de densidad) y
  *   corrige jerga cervecera mal transcripta ("o g" → "OG", "güirpul" → "whirlpool", etc.).
  * - `toSpeechText`: prepara la respuesta para el sintetizador (TTS): elimina markdown y emojis,
- *   pronuncia densidades ("1.052" → "uno cero 52"), decimales ("55.8" → "55 coma 8") y unidades.
+ *   pronuncia densidades ("1.052" → "uno cero cincuenta y dos"), decimales ("55.8" → "55 coma 8")
+ *   y unidades ("litros", "grados", "centímetros").
  */
 
 // ============================================================================
@@ -107,6 +108,7 @@ const JARGON_FIXES: [RegExp, string][] = [
   [/\b(?:bricks|brics|briks)\b/gi, 'Brix'],
   [/\b(?:estarter|estárter|starte)\b/gi, 'starter'],
   [/\b(?:spartch|esparch|espárch|esparge)\b/gi, 'sparge'],
+  [/\b(?:estraik|estrike|strik)\b/gi, 'strike'],
   [/\b(?:centímetro|centimetro)\b/gi, 'centímetros'],
   [/\brefractometro\b/gi, 'refractómetro'],
   [/\bdensimetro\b/gi, 'densímetro'],
@@ -166,7 +168,6 @@ function parseNumberRun(keys: string[], i: number): ParsedRun | null {
     }
 
     if (k === 'y') {
-      // "y" solo une decenas con unidades ("cuarenta y cinco") o "y medio"
       const next = keys[j + 1];
       if (last === 'ten' && next && NUM_WORDS[next]?.cls === 'unit') {
         current += NUM_WORDS[next].value;
@@ -180,7 +181,6 @@ function parseNumberRun(keys: string[], i: number): ParsedRun | null {
     const w = NUM_WORDS[k];
     if (!w) break;
 
-    // Transiciones válidas dentro de un grupo < 1000
     const valid =
       last === null ||
       last === 'mil' ||
@@ -198,7 +198,6 @@ function parseNumberRun(keys: string[], i: number): ParsedRun | null {
   let value = total + current;
   let text = String(value);
 
-  // "y medio" / "y media"
   if (keys[j] === 'y' && (keys[j + 1] === 'medio' || keys[j + 1] === 'media')) {
     value += 0.5;
     text = String(value);
@@ -232,12 +231,23 @@ export function normalizeTranscript(input: string): string {
   while (i < tokens.length) {
     const run = parseNumberRun(keys, i);
     if (!run) {
+      // Si el usuario dictó directamente un entero de 4 dígitos como "1050" en contexto de densidad
+      const rawNum = Number(keys[i]);
+      if (Number.isInteger(rawNum) && rawNum >= 980 && rawNum <= 1200) {
+        const context = keys.slice(Math.max(0, i - 6), Math.min(keys.length, i + 4)).join(' ');
+        const lastGravityIdx = out.length > 0 ? out.join(' ').search(/\b1\.\d{3}\b/) : -1;
+        if (DENSITY_CONTEXT.test(context) || lastGravityIdx >= 0) {
+          const trailing = tokens[i].match(/[.,;:!?]+$/)?.[0] ?? '';
+          out.push((rawNum / 1000).toFixed(3) + trailing);
+          i++;
+          continue;
+        }
+      }
       out.push(tokens[i]);
       i++;
       continue;
     }
 
-    // "uno"/"un"/"una" aislados se dejan como palabra ("uno de los tanques", "un barril")
     const isLoneOne =
       run.end - run.start === 1 && ['uno', 'un', 'una'].includes(keys[run.start]);
 
@@ -259,11 +269,11 @@ export function normalizeTranscript(input: string): string {
       continue;
     }
 
-    // Densidad en puntos enteros ("mil cincuenta" → "1.050") según contexto previo
+    // Densidad en puntos enteros ("mil cincuenta" → "1.050") según contexto previo/posterior
     if (!numberText.includes('.')) {
       const n = Number(numberText);
       if (n >= 980 && n <= 1200) {
-        const context = keys.slice(Math.max(0, run.start - 6), run.start).join(' ');
+        const context = keys.slice(Math.max(0, run.start - 6), Math.min(keys.length, end + 4)).join(' ');
         const lastGravityIdx = out.length > 0 ? out.join(' ').search(/\b1\.\d{3}\b/) : -1;
         if (DENSITY_CONTEXT.test(context) || lastGravityIdx >= 0) {
           numberText = (n / 1000).toFixed(3);
@@ -271,7 +281,6 @@ export function normalizeTranscript(input: string): string {
       }
     }
 
-    // Preservar puntuación final del último token consumido
     const trailing = tokens[end - 1].match(/[.,;:!?]+$/)?.[0] ?? '';
     out.push(numberText + trailing);
     i = end;
@@ -284,13 +293,33 @@ export function normalizeTranscript(input: string): string {
 // 4. PREPARACIÓN DE TEXTO PARA SÍNTESIS DE VOZ (TTS)
 // ============================================================================
 
+const TWO_DIGIT_SPOKEN: Record<number, string> = {
+  0: 'cero', 1: 'uno', 2: 'dos', 3: 'tres', 4: 'cuatro', 5: 'cinco', 6: 'seis', 7: 'siete', 8: 'ocho', 9: 'nueve',
+  10: 'diez', 11: 'once', 12: 'doce', 13: 'trece', 14: 'catorce', 15: 'quince',
+  16: 'dieciséis', 17: 'diecisiete', 18: 'dieciocho', 19: 'diecinueve', 20: 'veinte',
+  21: 'veintiuno', 22: 'veintidós', 23: 'veintitrés', 24: 'veinticuatro', 25: 'veinticinco',
+  26: 'veintiséis', 27: 'veintisiete', 28: 'veintiocho', 29: 'veintinueve',
+  30: 'treinta', 40: 'cuarenta', 50: 'cincuenta', 60: 'sesenta', 70: 'setenta', 80: 'ochenta', 90: 'noventa',
+};
+
+/**
+ * Convierte un número de 0 a 99 en palabras en español ("52" → "cincuenta y dos").
+ */
+export function numberUnder100ToWords(n: number): string {
+  const clean = Math.max(0, Math.min(99, Math.round(n)));
+  if (TWO_DIGIT_SPOKEN[clean]) return TWO_DIGIT_SPOKEN[clean];
+  const ten = Math.floor(clean / 10) * 10;
+  const unit = clean % 10;
+  return `${TWO_DIGIT_SPOKEN[ten] || ten} y ${TWO_DIGIT_SPOKEN[unit] || unit}`;
+}
+
 /**
  * Limpia markdown/emojis y adapta números, densidades y unidades para que el sintetizador
  * español los pronuncie de forma natural.
  *
  * @example
  * toSpeechText('Tenés **55.8 L** con OG 1.052 a 18°C')
- * // → 'Tenés 55 coma 8 litros con densidad inicial uno cero 52 a 18 grados'
+ * // → 'Tenés 55 coma 8 litros con densidad inicial uno cero cincuenta y dos a 18 grados'
  */
 export function toSpeechText(input: string): string {
   if (!input) return '';
@@ -316,13 +345,16 @@ export function toSpeechText(input: string): string {
   t = t.replace(/\s*×\s*/g, ' por ');
   t = t.replace(/\s*≈\s*/g, ' aproximadamente ');
 
-  // Densidades 1.0xx / 1.1xx (no montos de dinero ni miles con unidades)
+  // Densidades 1.0xx / 1.1xx ("1.052" → "uno cero cincuenta y dos (52)")
   t = t.replace(
     /(^|[^$\d.,])1[.,]([01])(\d{2})(?![\d.,]|\s*(?:pesos|litros|L\b|kg|g\b))/g,
-    (_m, pre: string, d1: string, rest: string) =>
-      d1 === '0'
-        ? `${pre}uno cero ${Number(rest)}`
-        : `${pre}uno ${Number(`1${rest}`)}`
+    (_m, pre: string, d1: string, rest: string) => {
+      const twoDigitNum = Number(rest);
+      const words = numberUnder100ToWords(twoDigitNum);
+      return d1 === '0'
+        ? `${pre}uno cero ${words} (${twoDigitNum})`
+        : `${pre}uno ciento ${words} (1${rest})`;
+    }
   );
 
   // Miles con punto: "45.000" → "45000"
@@ -342,7 +374,7 @@ export function toSpeechText(input: string): string {
   t = t.replace(/(\d)\s*g\/L\b/g, '$1 gramos por litro');
   t = t.replace(/(\d)\s*(?:L|lts?|litros?)\b/g, '$1 litros');
   t = t.replace(/(\d)\s*mL\b|(\d)\s*ml\b/g, (_m, a, b) => `${a ?? b} mililitros`);
-  t = t.replace(/(\d)\s*cm\b/g, '$1 centímetros');
+  t = t.replace(/(\d)\s*(?:cm|centimetros?|centímetros?)\b/gi, '$1 centímetros');
   t = t.replace(/(\d)\s*kg\b/g, '$1 kilos');
   t = t.replace(/(\d)\s*g\b/g, '$1 gramos');
   t = t.replace(/(\d)\s*bar\b/g, '$1 bar');

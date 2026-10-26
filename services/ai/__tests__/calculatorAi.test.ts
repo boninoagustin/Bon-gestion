@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { executeTool } from '../tools';
+import { executeTool, READ_TOOLS, toolExecutors, aiTools } from '../tools';
 import { tryOfflineCalculation } from '../calcTools';
 import { normalizeTranscript, toSpeechText, looksIncompleteUtterance } from '../voiceText';
-import { 
-  extractCalculatorLinks, 
-  stripCalculatorTags, 
+import {
+  extractCalculatorLinks,
+  stripCalculatorTags,
   openCalculatorFromAi,
   peekPendingCalculator,
   clearPendingCalculator,
@@ -12,6 +12,36 @@ import {
 } from '../calculatorBridge';
 
 describe('Brewing AI Calculator Suite & Engineering Dialogue', () => {
+
+  describe('Tool Registry & Declarations (READ_TOOLS & toolExecutors)', () => {
+    it('registers all mandatory brewmath calculator tools in READ_TOOLS, aiTools[0].functionDeclarations, and toolExecutors', () => {
+      const requiredTools = [
+        'calculate_kettle_volume',
+       'calculate_strike_water',
+       'calculate_sparge_water',
+       'calculate_carbonation',
+       'calculate_refractometer_correction',
+       'calculate_hydrometer_temp_correction',
+       'calculate_pitch_rate_and_starter',
+       'calculate_acid_addition',
+       'calculate_dilution_and_boiloff',
+       'calculate_abv',
+       'calculate_ibu',
+       'calculate_priming',
+       'calculate_srm',
+       'calculate_recipe_metrics',
+      ];
+
+      const readToolNames = READ_TOOLS.map((t) => t.name);
+      const declaredNames = aiTools[0].functionDeclarations.map((t) => t.name);
+
+      for (const name of requiredTools) {
+        expect(readToolNames).toContain(name);
+        expect(declaredNames).toContain(name);
+        expect(typeof toolExecutors[name]).toBe('function');
+      }
+    });
+  });
 
   describe('Scenario 1: Kettle Volume calculation with dimensions', () => {
     it('executes calculate_kettle_volume and yields ~55.8 L for 35 cm diameter and 58 cm height', () => {
@@ -36,6 +66,7 @@ describe('Brewing AI Calculator Suite & Engineering Dialogue', () => {
 
       expect(offline).not.toBeNull();
       expect(offline).toContain('55,8 L');
+      expect(offline).toContain('Calculado con motor local offline');
       expect(offline).toContain('[ABRIR_CALCULADORA:');
     });
 
@@ -47,6 +78,7 @@ describe('Brewing AI Calculator Suite & Engineering Dialogue', () => {
       expect(spoken).not.toContain('ABRIR_CALCULADORA');
       expect(spoken).toContain('55 coma 8');
       expect(spoken).toContain('litros');
+      expect(spoken).toContain('centímetros');
     });
   });
 
@@ -110,12 +142,15 @@ describe('Brewing AI Calculator Suite & Engineering Dialogue', () => {
       expect(offline).not.toBeNull();
       expect(offline).toContain('5,25 %');
       expect(offline).toContain('80 %');
+      expect(offline).toContain('Calculado con motor local offline');
     });
 
-    it('TTS formats gravities and percentages into spoken Spanish without trailing zeroes', () => {
-      const rawText = 'Con OG 1.050 y FG 1.010 tenés un ABV de 5.2%.';
+    it('TTS formats gravities ("uno cero cincuenta y dos") and percentages into spoken Spanish without markdown', () => {
+      const rawText = 'Con OG 1.052 y FG 1.010 tenés un ABV de 5.2%.';
       const spoken = toSpeechText(rawText);
 
+      expect(spoken).toContain('uno cero cincuenta y dos');
+      expect(spoken).toContain('uno cero diez');
       expect(spoken).toContain('5 coma 2 por ciento');
       expect(spoken).not.toContain('OG');
       expect(spoken).toContain('densidad inicial');
@@ -137,13 +172,14 @@ describe('Brewing AI Calculator Suite & Engineering Dialogue', () => {
   });
 
   describe('Calculator Bridge & Deep Linking', () => {
-    it('extracts deep link tags and returns clean markdown text', () => {
-      const text = 'Resultado: **55.8 L**.\n[ABRIR_CALCULADORA: {"type":"KETTLE","params":{"diameterCm":35,"liquidHeightCm":58}}]\n¡Fijate en la olla!';
+    it('extracts strict JSON and relaxed JS deep link tags and returns clean markdown text', () => {
+      const text = 'Resultado: **55.8 L**.\n[ABRIR_CALCULADORA: { type: \'kettle\', params: { diameter: 35, height: 58 } }]\n¡Fijate en la olla!';
       const { cleanText, links } = extractCalculatorLinks(text);
 
       expect(links).toHaveLength(1);
       expect(links[0].type).toBe('KETTLE');
       expect(links[0].params.diameterCm).toBe(35);
+      expect(links[0].params.liquidHeightCm).toBe(58);
       expect(cleanText).not.toContain('[ABRIR_CALCULADORA:');
       expect(cleanText).toContain('Resultado: **55.8 L**.');
       expect(stripCalculatorTags(text)).toBe(cleanText);
@@ -162,6 +198,7 @@ describe('Brewing AI Calculator Suite & Engineering Dialogue', () => {
       expect(pending).not.toBeNull();
       expect(pending!.type).toBe('CARB');
       expect(pending!.params.temperatureC).toBe(4);
+      expect(pending!.params.targetCO2Volumes).toBe(2.5);
 
       clearPendingCalculator('CARB');
       expect(peekPendingCalculator()).toBeNull();

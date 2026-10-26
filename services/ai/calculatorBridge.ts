@@ -3,9 +3,10 @@
  * de calculadoras (`components/Calculators.tsx`).
  *
  * Flujo:
- * 1. Una tool de cálculo (`services/ai/tools.ts`) devuelve `calculatorLink: { type, params }`.
+ * 1. Una tool de cálculo (`services/ai/tools.ts`) devuelve `calculatorLinks: [{ type, params }]`.
  * 2. `geminiService` serializa el link en el texto final como
- *    `[ABRIR_CALCULADORA: {"type":"KETTLE","params":{...}}]` (solo en modo texto).
+ *    `[ABRIR_CALCULADORA: {"type":"KETTLE","params":{...}}]` (también soporta sintaxis JS relajada
+ *    como `[ABRIR_CALCULADORA: { type: 'kettle', params: { diameter: 35, height: 58 } }]`).
  * 3. `AiConsultant` extrae los tags con `extractCalculatorLinks` y renderiza Action Cards.
  * 4. Al hacer clic, `openCalculatorFromAi` deja los parámetros "en espera", navega a la vista
  *    de Calculadoras y la calculadora correspondiente los consume con `useCalculatorPrefill`.
@@ -31,7 +32,17 @@ export type CalculatorKind =
   | 'ACID'
   | 'DILUTION'
   | 'ABV'
-  | 'PRIMING';
+  | 'PRIMING'
+  | 'IBU'
+  | 'COLOR'
+  | 'EFFICIENCY'
+  | 'RECIPE'
+  | 'DRY_HOP'
+  | 'COLD_CRASH'
+  | 'CALORIES'
+  | 'PARTIGYLE'
+  | 'WATER_CHEM'
+  | 'EQUIPMENT';
 
 export type CalculatorParams = Record<string, number | string>;
 
@@ -53,7 +64,57 @@ const VALID_KINDS: readonly CalculatorKind[] = [
   'DILUTION',
   'ABV',
   'PRIMING',
+  'IBU',
+  'COLOR',
+  'EFFICIENCY',
+  'RECIPE',
+  'DRY_HOP',
+  'COLD_CRASH',
+  'CALORIES',
+  'PARTIGYLE',
+  'WATER_CHEM',
+  'EQUIPMENT',
 ];
+
+const KIND_ALIASES: Record<string, CalculatorKind> = {
+  KETTLE_VOLUME: 'KETTLE',
+  OLLA: 'KETTLE',
+  STRIKE_WATER: 'STRIKE',
+  EMPASTE: 'STRIKE',
+  SPARGE_WATER: 'SPARGE',
+  LAVADO: 'SPARGE',
+  CARBONATION: 'CARB',
+  CARBONATACION: 'CARB',
+  HYDROMETER: 'DENSITY',
+  DENSIMETRO: 'DENSITY',
+  PITCH_RATE: 'PITCH',
+  YEAST: 'PITCH',
+  LEVADURA: 'PITCH',
+  PH: 'ACID',
+  BOILOFF: 'DILUTION',
+  SRM: 'COLOR',
+};
+
+/** Normalización de alias de claves de parámetros (ej. `diameter` -> `diameterCm`, `height` -> `liquidHeightCm`). */
+const PARAM_KEY_ALIASES: Record<string, string> = {
+  diameter: 'diameterCm',
+  diametro: 'diameterCm',
+  height: 'liquidHeightCm',
+  altura: 'liquidHeightCm',
+  liquidHeight: 'liquidHeightCm',
+  grainKg: 'grainWeightKg',
+  mashTempC: 'targetMashTempC',
+  mashRatio: 'waterToGrainRatioLKg',
+  ratio: 'waterToGrainRatioLKg',
+  tempC: 'beerTempC',
+  vols: 'targetCO2Volumes',
+  volumesCo2: 'targetCO2Volumes',
+  ogBrix: 'originalBrix',
+  fgBrix: 'currentBrix',
+  finalBrix: 'currentBrix',
+  wcf: 'wortCorrectionFactor',
+  sampleTempC: 'measuredTempC',
+};
 
 /** Etiquetas legibles para las Action Cards del chat. */
 export const CALCULATOR_LABELS: Record<CalculatorKind, string> = {
@@ -69,6 +130,16 @@ export const CALCULATOR_LABELS: Record<CalculatorKind, string> = {
   DILUTION: 'Dilución / Hervor',
   ABV: 'Alcohol (ABV)',
   PRIMING: 'Priming',
+  IBU: 'Amargor (IBU)',
+  COLOR: 'Color (SRM / EBC)',
+  EFFICIENCY: 'Eficiencia de Equipo',
+  RECIPE: 'Diseño de Receta',
+  DRY_HOP: 'Tasa de Dry Hop',
+  COLD_CRASH: 'Rampa de Frío',
+  CALORIES: 'Calorías Cerveza',
+  PARTIGYLE: 'Parti-gyle',
+  WATER_CHEM: 'Química de Agua',
+  EQUIPMENT: 'Termodinámica de Equipos',
 };
 
 /** Etiquetas legibles de parámetros para mostrar en la tarjeta. */
@@ -81,6 +152,7 @@ export const PARAM_LABELS: Record<string, string> = {
   waterToGrainRatioLKg: 'Relación (L/kg)',
   thermalLossC: 'Pérdida (°C)',
   totalWaterL: 'Agua total (L)',
+  preBoilVolumeL: 'Pre-hervor (L)',
   absorptionLPerKg: 'Absorción (L/kg)',
   deadSpaceL: 'Espacio muerto (L)',
   beerTempC: 'Cerveza (°C)',
@@ -92,8 +164,10 @@ export const PARAM_LABELS: Record<string, string> = {
   measuredTempC: 'Muestra (°C)',
   calibrationTempC: 'Calibración (°C)',
   volumeL: 'Volumen (L)',
+  batchVolumeL: 'Volumen (L)',
   targetOG: 'OG',
   yeastType: 'Levadura',
+  pitchStyle: 'Levadura',
   cellsPerPackBillions: 'Células/paq. (B)',
   viabilityPercent: 'Viabilidad (%)',
   starterVolumeL: 'Starter (L)',
@@ -116,19 +190,69 @@ export const PARAM_LABELS: Record<string, string> = {
 
 export const CALCULATOR_TAG_REGEX = /\[ABRIR_CALCULADORA:\s*(\{[\s\S]*?\})\s*\]/g;
 
-/** Normaliza y valida un link crudo (por ejemplo, proveniente de JSON parseado). */
+/**
+ * Convierte sintaxis JS relajada (ej. `{ type: 'kettle', params: { diameter: 35, height: 58 } }`)
+ * a JSON estricto antes de parsear.
+ */
+function parseRelaxedJsonObject(rawJson: string): unknown {
+  try {
+    return JSON.parse(rawJson);
+  } catch {
+    try {
+      const normalized = rawJson
+        .replace(/'([^']*)'/g, '"$1"')
+        .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":')
+        .replace(/,\s*([}\]])/g, '$1');
+      return JSON.parse(normalized);
+    } catch {
+      return null;
+    }
+  }
+}
+
+/** Normaliza y valida un link crudo (por ejemplo, proveniente de JSON o sintaxis JS). */
 export function normalizeCalculatorLink(raw: unknown): CalculatorDeepLink | null {
   if (!raw || typeof raw !== 'object') return null;
   const rec = raw as Record<string, unknown>;
-  const type = String(rec.type ?? '').toUpperCase().trim() as CalculatorKind;
-  if (!VALID_KINDS.includes(type)) return null;
+  const rawType = String(rec.type ?? '').toUpperCase().trim();
+  const type = (VALID_KINDS.includes(rawType as CalculatorKind)
+    ? rawType
+    : KIND_ALIASES[rawType]) as CalculatorKind | undefined;
+  if (!type || !VALID_KINDS.includes(type)) return null;
+
   const params: CalculatorParams = {};
   if (rec.params && typeof rec.params === 'object') {
-    for (const [k, v] of Object.entries(rec.params as Record<string, unknown>)) {
-      if (typeof v === 'number' && Number.isFinite(v)) params[k] = v;
-      else if (typeof v === 'string' && v.trim()) params[k] = v.trim();
+    for (const [rawKey, v] of Object.entries(rec.params as Record<string, unknown>)) {
+      const canonicalKey = PARAM_KEY_ALIASES[rawKey] || rawKey;
+      if (typeof v === 'number' && Number.isFinite(v)) {
+        params[canonicalKey] = v;
+        if (canonicalKey !== rawKey) params[rawKey] = v;
+      } else if (typeof v === 'string' && v.trim()) {
+        params[canonicalKey] = v.trim();
+        if (canonicalKey !== rawKey) params[rawKey] = v.trim();
+      }
     }
   }
+
+  // Asegurar compatibilidad cruzada en PITCH y CARB
+  if (type === 'PITCH') {
+    if (params.volumeL !== undefined && params.batchVolumeL === undefined) {
+      params.batchVolumeL = params.volumeL;
+    }
+    if (params.batchVolumeL !== undefined && params.volumeL === undefined) {
+      params.volumeL = params.batchVolumeL;
+    }
+    if (params.targetOG !== undefined && params.og === undefined) {
+      params.og = params.targetOG;
+    }
+    if (params.og !== undefined && params.targetOG === undefined) {
+      params.targetOG = params.og;
+    }
+    if (params.yeastType !== undefined && params.pitchStyle === undefined) {
+      params.pitchStyle = String(params.yeastType).toUpperCase();
+    }
+  }
+
   return { type, params };
 }
 
@@ -146,17 +270,14 @@ export function extractCalculatorLinks(text: string): {
   const seen = new Set<string>();
   const cleanText = (text || '')
     .replace(CALCULATOR_TAG_REGEX, (_m, json: string) => {
-      try {
-        const link = normalizeCalculatorLink(JSON.parse(json));
-        if (link) {
-          const key = JSON.stringify(link);
-          if (!seen.has(key)) {
-            seen.add(key);
-            links.push(link);
-          }
+      const parsed = parseRelaxedJsonObject(json);
+      const link = normalizeCalculatorLink(parsed);
+      if (link) {
+        const key = `${link.type}:${JSON.stringify(link.params)}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          links.push(link);
         }
-      } catch {
-        // Tag malformado: se descarta silenciosamente.
       }
       return '';
     })
@@ -182,7 +303,7 @@ function readPending(): CalculatorDeepLink | null {
   if (pending) return pending;
   try {
     const raw = typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(STORAGE_KEY) : null;
-    if (raw) pending = normalizeCalculatorLink(JSON.parse(raw));
+    if (raw) pending = normalizeCalculatorLink(parseRelaxedJsonObject(raw));
   } catch {
     pending = null;
   }
@@ -211,23 +332,25 @@ export function clearPendingCalculator(type?: CalculatorKind): void {
  * guarda el link pendiente, navega a la vista CALCULATORS y notifica a la vista si ya está montada.
  */
 export function openCalculatorFromAi(
-  linkOrType: CalculatorDeepLink | CalculatorKind,
+  linkOrType: CalculatorDeepLink | CalculatorKind | string,
   params?: CalculatorParams
 ): void {
-  const link: CalculatorDeepLink =
+  const normalized =
     typeof linkOrType === 'string'
-      ? { type: linkOrType, params: params ?? {} }
-      : linkOrType;
+      ? normalizeCalculatorLink({ type: linkOrType, params: params ?? {} })
+      : normalizeCalculatorLink(linkOrType);
 
-  pending = link;
+  if (!normalized) return;
+
+  pending = normalized;
   try {
-    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(link));
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
   } catch {
     // sin storage: queda en memoria
   }
   if (typeof window === 'undefined') return;
   window.dispatchEvent(new CustomEvent('bon:navigate', { detail: { view: ViewState.CALCULATORS } }));
-  window.dispatchEvent(new CustomEvent(CALCULATOR_OPEN_EVENT, { detail: link }));
+  window.dispatchEvent(new CustomEvent(CALCULATOR_OPEN_EVENT, { detail: normalized }));
 }
 
 /**
